@@ -1,0 +1,36 @@
+"""Database package initialization."""
+from database.db_manager import (
+    initialize_database,
+    get_connection,
+    register_user,
+    verify_login,
+    reset_password,
+    add_student,
+    update_student,
+    delete_student,
+    fetch_all_students,
+    search_students,
+    get_student_by_id,
+    update_photo_sample_status,
+    log_attendance,
+    fetch_all_attendance,
+    update_attendance_record,
+)
+
+__all__ = [
+    "initialize_database",
+    "get_connection",
+    "register_user",
+    "verify_login",
+    "reset_password",
+    "add_student",
+    "update_student",
+    "delete_student",
+    "fetch_all_students",
+    "search_students",
+    "get_student_by_id",
+    "update_photo_sample_status",
+    "log_attendance",
+    "fetch_all_attendance",
+    "update_attendance_record",
+]
