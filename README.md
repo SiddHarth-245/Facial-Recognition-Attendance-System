@@ -164,53 +164,62 @@ python login.py
 ```
 d:/Facial Recognition Attendance Management System/
 │
-├── main.py                             # Master Application Entry Point
-├── login.py                            # Registered-Users-Only Auth Portal
-├── register.py                         # User Account Registration Window
-├── forget_password.py                  # Self-Service Credential Recovery
-├── dashboard.py                        # Central Hub with 8 Biometric Modules
-├── student.py                          # Student Details Management & Dataset Capture
-├── train.py                            # LBPH Face Classifier Training Pipeline
-├── face_recognition.py                 # Live Face Recognition & Temporal HUD
-├── attendance.py                       # Interactive Attendance Log & CSV Manager
-├── developer.py                        # System Specs & Developer Info
-├── help_desk.py                        # Help Desk, Calibration & FAQ Guide
-├── test_system.py                      # Automated 6-Suite Regression Test Runner
-├── generate_cyber_2k_assets.py         # 2K UI Wallpaper & Banner Generator
-├── generate_icons.py                   # 256x256 Anti-Aliased Vector Icon Generator
-├── haarcascade_frontalface_default.xml # OpenCV Frontal Face Detection Model
-├── requirements.txt                    # Project Dependencies
-├── README.md                           # Documentation & Architecture Guide
+├── main.py                                  # Primary Application Entry Point
+├── requirements.txt                         # Python Dependencies
+├── haarcascade_frontalface_default.xml      # Frontal Face Cascade Classifier
+├── Facial_Recognition_Attendance_System_Report.ipynb # Technical Project Report
+├── README.md                                # System Documentation
 │
-├── database/                           # Relational Database Storage Layer
+├── modules/                                 # GUI Windows & Action Controllers
 │   ├── __init__.py
-│   ├── db_manager.py                   # Dual SQLite/MySQL Storage Manager
-│   └── attendance_system.db            # SQLite Database File (WAL Mode)
+│   ├── login.py                             # Authentication & Security Gateway
+│   ├── register.py                          # User Account Registration Window
+│   ├── forget_password.py                   # Self-Service Credential Recovery
+│   ├── dashboard.py                         # Central Hub (8 Core Interactive Modules)
+│   ├── student.py                           # Student Management & Dataset Capture
+│   ├── train.py                             # LBPH Face Classifier Training Pipeline
+│   ├── face_recognition.py                  # Live Face Recognition & Temporal HUD
+│   ├── attendance.py                        # Attendance Viewer & CSV Manager
+│   ├── developer.py                         # Developer Profiles & Team Attribution
+│   └── help_desk.py                         # Help Desk & Troubleshooting Guide
 │
-├── assets/                             # Procedurally Generated UI Graphics
-│   ├── bg_login.png
-│   ├── login_bg_cyber.png
-│   ├── dashboard_bg_cyber.png
-│   ├── face_recog_bg_cyber.png
-│   ├── student_header.png
-│   ├── attendance_header.png
-│   ├── train_top_banner.png
-│   ├── register_banner.png
-│   └── icons/                          # 8 HD Tile Icons (256x256)
-│       ├── tile_student.png
-│       ├── tile_face.png
-│       ├── tile_attendance.png
-│       ├── tile_train.png
-│       ├── tile_photos.png
-│       ├── tile_developer.png
-│       ├── tile_help.png
-│       └── tile_exit.png
+├── database/                                # Relational Database Storage Layer
+│   ├── __init__.py
+│   ├── db_manager.py                        # Concurrency-Tuned WAL Engine
+│   └── attendance_system.db                 # SQLite Database File
 │
-├── data/                               # Captured Face Samples (user.<id>.<count>.jpg)
-├── classifier/                         # Compiled LBPH Classifier & ID Mapping
+├── utils/                                   # Testing, Verification & Asset Tools
+│   ├── __init__.py
+│   ├── test_system.py                       # Automated 6-Suite Regression Test Runner
+│   ├── verify_full_system.py                # System Health & Diagnostic Suite
+│   ├── generate_cyber_2k_assets.py          # 2K UI Wallpaper & Banner Generator
+│   └── generate_icons.py                    # 256x256 Vector Icon Generator
+│
+├── assets/                                  # 100% Zero-Watermark 2K UI Graphics
+│   ├── bg_login.png                         # Login Background
+│   ├── login_bg_cyber.png                   # Cyber Login Wallpaper
+│   ├── dashboard_bg_cyber.png               # Main Dashboard Wallpaper
+│   ├── face_recog_bg_cyber.png              # Face Recognition Studio Wallpaper
+│   ├── student_header.png                   # Student Details Header Banner
+│   ├── attendance_header.png                # Attendance Header Banner
+│   ├── train_top_banner.png                 # Model Training Banner
+│   ├── register_banner.png                  # Registration Portal Banner
+│   ├── tile_student.png                     # Student Module Icon
+│   ├── tile_face.png                        # Face Recognition Module Icon
+│   ├── tile_attendance.png                  # Attendance Module Icon
+│   ├── tile_train.png                       # Model Training Module Icon
+│   ├── tile_photos.png                      # Photos Dataset Module Icon
+│   ├── tile_developer.png                   # Developer Module Icon
+│   ├── tile_help.png                        # Help Desk Module Icon
+│   ├── tile_exit.png                        # System Exit Module Icon
+│   ├── dev_1.jpg to dev_6.jpg               # Developer Portraits
+│   └── report_charts/                       # Evaluation Benchmark Charts
+│
+├── data/                                    # Captured Face Samples (user.<id>.<count>.jpg)
+├── classifier/                              # Compiled LBPH Classifier & ID Mapping
 │   ├── classifier.xml
 │   └── id_map.json
-└── attendance_records/                 # CSV Attendance Records & Exported Reports
+└── attendance_records/                      # CSV Attendance Records & Exported Reports
 ```
 
 ---
@@ -220,7 +229,9 @@ d:/Facial Recognition Attendance Management System/
 The project includes an automated regression test suite testing all subsystems:
 
 ```powershell
-python test_system.py
+python utils/test_system.py
+# Or run the complete system health check:
+python utils/verify_full_system.py
 ```
 
 ### Test Coverage:

@@ -48,7 +48,7 @@ if BASE_DIR not in sys.path:
 
 # Import internal modules
 from database.db_manager import initialize_database
-from login import LoginWindow
+from modules.login import LoginWindow
 
 def main():
     """
@@ -98,12 +98,10 @@ def main():
     bg_asset = os.path.join(BASE_DIR, "assets", "bg_login.png")
     if not os.path.exists(bg_asset):
         try:
-            from assets.generate_assets import create_cyber_bg, create_header_banner, create_register_banner, create_user_avatar, create_dashboard_icons
-            create_cyber_bg()
-            create_header_banner()
-            create_register_banner()
-            create_user_avatar()
-            create_dashboard_icons()
+            from utils.generate_cyber_2k_assets import generate_all_2k_cyber_assets
+            from utils.generate_icons import generate_all_icons
+            generate_all_2k_cyber_assets()
+            generate_all_icons()
         except Exception as e:
             print(f"Asset generation notice: {e}")
 
