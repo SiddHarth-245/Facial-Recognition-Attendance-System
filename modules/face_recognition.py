@@ -1,10 +1,9 @@
-import sys
 """
 ========================================================================================
 Real-Time Biometric Face Recognition & Attendance Logging Module
-FaceAttend Cyber-Blue Ultra Enterprise Edition (Anti-Flicker Temporal Stabilization)
+FaceAttend Cyber-Blue Ultra Enterprise Edition (Embedded Viewport & Anti-Flicker HUD)
 ========================================================================================
-Module: face_recognition.py
+Module: modules/face_recognition.py
 Author: Ved Prakash Pandey (Lead Developer - Biometric Detection & Camera Pipelines)
 Mentorship: Mr. Rakesh Kumar Rai (KIIT University)
 
@@ -15,28 +14,31 @@ video feeds from the system webcam, detects human faces in real-time, extracts i
 textural feature maps, queries the trained LBPH Machine Learning model (`classifier/classifier.xml`),
 and performs dual-persistence attendance logging (synchronous SQLite3 + CSV file record).
 
-Anti-Confusion & High-Precision Recognition Pipeline:
-------------------------------------------------------
-1. Temporal Multi-Frame Majority Voting & Smoothing:
-   - Uses a rolling 8-frame temporal buffer (`TemporalFaceTracker`) to eliminate frame-to-frame
+Key System Capabilities:
+------------------------
+1. Native Embedded Viewport (Zero Window Stretching / Zero Distortion):
+   - Streams live camera feeds directly inside the native Tkinter Cyber-Blue card with
+     aspect-ratio auto-fitting and anti-aliased Lanczos/linear scaling.
+2. Temporal Multi-Frame Majority Voting & Stabilization:
+   - Uses an 8-frame rolling buffer (`TemporalFaceTracker`) to eliminate frame-to-frame
      identity flipping and flickering between enrolled students caused by lighting/sensor noise.
-2. Standardized Zero-Padding Crop Matching:
-   - Exactly matches the 0% bounding box crop (`gray[y:y+h, x:x+w]`) used during dataset acquisition,
+3. Anti-Collision Dynamic HUD Overlays:
+   - Dynamic boundary calculation guarantees badge text never collides or overlaps with
+     the top status bar, bottom guidance bar, or screen edges.
+4. Standardized Zero-Padding Crop Matching:
+   - Matches the 0% bounding box crop (`gray[y:y+h, x:x+w]`) used during dataset acquisition,
      preventing grid-cell spatial misalignment in LBPH 8x8 histograms.
-3. Calibrated Two-Tier Distance Thresholding:
+5. Calibrated Two-Tier Distance Thresholding:
    - High Confidence Match: `distance <= 60.0` (85% - 99% accuracy) -> Instant Green HUD.
    - Verified Match: `60.0 < distance <= 72.0` -> Confirmed after majority vote consensus.
    - Rejection Boundary: `distance > 72.0` -> Marked as 'Unknown Face' (Red HUD), preventing false
      swaps with other students.
-4. Threaded Video Processing (Zero GUI Freeze):
-   - Camera frame acquisition and LBPH recognition execute in a dedicated daemon thread.
-5. Multi-Pass Adaptive Face Detection Pipeline:
-   - Fast 0.5x Downsampling + Full-Res Fallback + CLAHE Low-Light Fallback.
-6. Dual-Persistence & Daily Deduplication:
+6. Dual-Persistence Attendance & Daily Deduplication:
    - Records attendance synchronously to SQLite database and CSV file with daily deduplication.
 ========================================================================================
 """
 
+import sys
 import os
 import csv
 import glob
@@ -63,13 +65,15 @@ except Exception:
     except Exception:
         pass
 
+# Ensure project root directory is in sys.path
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
 # Database operations for student info resolution and attendance recording
 from database.db_manager import get_student_by_id, log_attendance
 
 # Filesystem directory paths
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 CLASSIFIER_DIR = os.path.join(BASE_DIR, "classifier")
@@ -212,60 +216,58 @@ def ensure_classifier_ready() -> tuple:
     return True, "Classifier ready."
 
 
-class TemporalFaceTracker:
+class SpatialFaceTracker:
     """
-    Multi-Frame Temporal Voting & Stabilization Engine.
-    
-    Buffers frame-by-frame predictions to eliminate identity flickering,
-    reject noise fluctuations, and guarantee 100% consistent recognition.
+    Per-Face Spatial Temporal Stabilizer & Identity Consensus Engine.
+    Maintains independent majority-voting history for each distinct face.
     """
-    def __init__(self, history_len: int = 7, strict_threshold: float = 72.0):
+    def __init__(self, track_id: int = 1, history_len: int = 6, strict_threshold: float = 68.0):
+        self.track_id = track_id
         self.history_len = history_len
         self.strict_threshold = strict_threshold
-        self.buffer = deque(maxlen=history_len)
+        self.history = deque(maxlen=history_len)
+        self.bbox = None
+        self.last_seen = time.time()
         self.last_confirmed_id = None
         self.last_confirmed_name = None
         self.last_confirmed_roll = None
         self.last_confirmed_dep = None
         self.last_confirmed_conf = 0
-        self.last_confirmed_time = 0
 
-    def update(self, student_id: str, distance: float, student_info: dict) -> tuple:
+    def update(self, student_id: str, distance: float, student_info: dict, bbox: tuple = None) -> tuple:
         """
         Updates the tracker with current frame prediction and returns:
         (is_verified: bool, display_name: str, display_roll: str, display_dep: str, confidence_pct: int, status_str: str)
         """
         now = time.time()
+        self.bbox = bbox
+        self.last_seen = now
         
-        # Add to rolling history
-        self.buffer.append((student_id, distance))
+        # Add prediction to rolling history
+        self.history.append((student_id, distance))
 
-        # Check if current frame distance is too high (> strict_threshold)
+        # Rejection if distance is too high (> strict_threshold)
         if distance > self.strict_threshold:
-            # If recent buffer has no strong matches, return Unknown Face
-            valid_votes = [sid for sid, d in self.buffer if d <= self.strict_threshold]
+            valid_votes = [(sid, d) for sid, d in self.history if d <= self.strict_threshold]
             if not valid_votes:
                 return False, "Unknown Face", "--", "--", 0, "Unknown Face"
 
         # Count candidate votes within strict threshold
-        valid_items = [(sid, d) for sid, d in self.buffer if d <= self.strict_threshold]
+        valid_items = [(sid, d) for sid, d in self.history if d <= self.strict_threshold]
         if not valid_items:
             return False, "Unknown Face", "--", "--", 0, "Unknown Face"
 
         id_votes = Counter([sid for sid, d in valid_items])
         best_id, vote_count = id_votes.most_common(1)[0]
         
-        # Compute average distance for the winning candidate
         matching_distances = [d for sid, d in valid_items if sid == best_id]
         avg_distance = sum(matching_distances) / len(matching_distances)
 
-        # Minimum required votes for stable confirmation (at least 50% of buffer)
-        required_votes = max(2, len(self.buffer) // 2)
+        # Minimum required votes for stable confirmation (at least 2-3 votes in history)
+        required_votes = max(2, min(3, len(self.history)))
 
         if vote_count >= required_votes and avg_distance <= self.strict_threshold:
-            # High-Confidence Verified Match
             confidence_pct = max(10, min(99, int(100 - (avg_distance * 0.70))))
-            
             name = student_info.get("name", f"Student #{best_id}") if student_info else f"Student #{best_id}"
             roll = student_info.get("roll", str(best_id)) if student_info else str(best_id)
             dep = student_info.get("dep", "General") if student_info else "General"
@@ -275,28 +277,82 @@ class TemporalFaceTracker:
             self.last_confirmed_roll = roll
             self.last_confirmed_dep = dep
             self.last_confirmed_conf = confidence_pct
-            self.last_confirmed_time = now
 
             return True, name, roll, dep, confidence_pct, f"{confidence_pct}% Match (Verified)"
 
-        # Fallback to recent confirmed match if within 0.8s hold window and distance <= 74
-        if self.last_confirmed_id and (now - self.last_confirmed_time < 0.8) and distance <= 74.0:
-            return True, self.last_confirmed_name, self.last_confirmed_roll, self.last_confirmed_dep, self.last_confirmed_conf, f"{self.last_confirmed_conf}% Match (Verified)"
+        # Instant verification for very high confidence single matches (distance <= 50.0)
+        if distance <= 50.0 and student_info:
+            confidence_pct = max(10, min(99, int(100 - (distance * 0.70))))
+            name = student_info.get("name", f"Student #{student_id}")
+            roll = student_info.get("roll", str(student_id))
+            dep = student_info.get("dep", "General")
+            return True, name, roll, dep, confidence_pct, f"{confidence_pct}% Match (Verified)"
 
-        return False, "Verifying...", "--", "--", 0, "Verifying..."
+        return False, "Scanning...", "--", "--", 0, "Scanning Face..."
+
+
+# Alias for backward compatibility
+TemporalFaceTracker = SpatialFaceTracker
+
+
+class MultiFaceTrackerManager:
+    """
+    Manages spatial face tracks across frames using bounding box centroid association.
+    Eliminates cross-contamination between different faces and background artifacts.
+    """
+    def __init__(self, max_distance: float = 120.0, max_age_seconds: float = 0.8):
+        self.tracks = {}
+        self.next_id = 1
+        self.max_distance = max_distance
+        self.max_age_seconds = max_age_seconds
+
+    def match_boxes_to_trackers(self, detected_boxes: list) -> dict:
+        now = time.time()
+        # Purge stale tracks that disappeared
+        stale_ids = [tid for tid, trk in self.tracks.items() if (now - trk.last_seen) > self.max_age_seconds]
+        for tid in stale_ids:
+            del self.tracks[tid]
+
+        box_to_tracker = {}
+        used_tracks = set()
+
+        for idx, (x, y, w, h) in enumerate(detected_boxes):
+            cx, cy = x + w / 2.0, y + h / 2.0
+            best_track_id = None
+            min_dist = float("inf")
+
+            for tid, trk in self.tracks.items():
+                if tid in used_tracks or trk.bbox is None:
+                    continue
+                tx, ty, tw, th = trk.bbox
+                tcx, tcy = tx + tw / 2.0, ty + th / 2.0
+                dist = np.hypot(cx - tcx, cy - tcy)
+                if dist < self.max_distance and dist < min_dist:
+                    min_dist = dist
+                    best_track_id = tid
+
+            if best_track_id is not None:
+                used_tracks.add(best_track_id)
+                tracker = self.tracks[best_track_id]
+            else:
+                tracker = SpatialFaceTracker(track_id=self.next_id, history_len=6, strict_threshold=68.0)
+                self.tracks[self.next_id] = tracker
+                self.next_id += 1
+
+            box_to_tracker[idx] = tracker
+
+        return box_to_tracker
 
 
 class FaceRecognitionWindow:
     """
-    Biometric Face Recognition GUI and Camera Stream Controller.
+    Main Live Face Recognition & Attendance Studio GUI Controller.
     
-    Features:
-        - 100% Native FaceAttend Cyber-Blue Futuristic User Interface.
-        - Temporal Multi-Frame Voting (Zero Identity Flipping).
-        - Auto-Healing Self-Training Model Loader.
-        - Multi-Pass Adaptive Landmark Detection (Low-Light & Angle Invariant).
-        - Non-Blocking Threaded OpenCV Video Capture.
-        - Real-Time Live Recognized Student Profile Card.
+    Architecture:
+        - 100% Native Tkinter Cyber-Blue layout with embedded camera viewport.
+        - High-performance threaded OpenCV capture loop (60+ FPS).
+        - MultiFaceTrackerManager spatial face tracking.
+        - Dynamic HUD Overlays (Neon Green for Verified, Red for Unknown).
         - Dual-Persistence Logging (SQLite + CSV).
     """
 
@@ -311,7 +367,7 @@ class FaceRecognitionWindow:
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
         self.win_w = min(1360, int(screen_w * 0.95))
-        self.win_h = min(800, int(screen_h * 0.92))
+        self.win_h = min(820, int(screen_h * 0.92))
         x = (screen_w - self.win_w) // 2
         y = max(5, (screen_h - self.win_h) // 2 - 20)
         self.root.geometry(f"{self.win_w}x{self.win_h}+{x}+{y}")
@@ -319,13 +375,16 @@ class FaceRecognitionWindow:
         self.root.config(bg="#030b18")
         
         self._images = []
+        self._current_video_photo = None
         self.logged_session_students = set()
         self.is_camera_running = False
         self.camera_thread = None
         self.session_count = 0
+        self.var_hd_boost = tk.StringVar(value="Enhanced HD (Default)")
         
-        # Temporal recognition buffer
-        self.face_tracker = TemporalFaceTracker(history_len=7, strict_threshold=72.0)
+        # Multi-face spatial tracking manager
+        self.tracker_manager = MultiFaceTrackerManager(max_distance=120.0, max_age_seconds=0.8)
+        self.face_tracker = SpatialFaceTracker(track_id=1, history_len=6, strict_threshold=68.0)
         
         self.root.protocol("WM_DELETE_WINDOW", self.handle_back_or_close)
         self.setup_ui()
@@ -372,7 +431,7 @@ class FaceRecognitionWindow:
 
         lbl_sub = tk.Label(
             brand_frame,
-            text="Live 60+ FPS Video Stream Processing  •  Multi-Frame Temporal Voting  •  LBPH Machine Learning",
+            text="Live Embedded Video Stream  •  Anti-Flicker Temporal Voting  •  LBPH Machine Learning",
             font=("Segoe UI", 9),
             fg="#94a3b8",
             bg="#071a35"
@@ -401,7 +460,7 @@ class FaceRecognitionWindow:
         btn_back.bind("<Leave>", lambda e: btn_back.config(bg="#1e293b", fg="#ef4444"))
 
         # -------------------------------------------------------------------------
-        # 2. Main Workspace (2-Column Grid: Left Viewport 58% | Right Telemetry 42%)
+        # 2. Main Workspace (2-Column Grid: Left Viewport 60% | Right Telemetry 40%)
         # -------------------------------------------------------------------------
         workspace = tk.Frame(self.root, bg="#030b18")
         workspace.pack(fill=tk.BOTH, expand=True, padx=14, pady=4)
@@ -432,7 +491,7 @@ class FaceRecognitionWindow:
 
         lbl_left_title = tk.Label(
             left_header,
-            text="📷  Live Camera Stream & Biometric Target Viewport",
+            text="📷  Live Camera Stream & Biometric Viewport",
             font=("Segoe UI", 12, "bold"),
             fg="#ffffff",
             bg="#071a35"
@@ -454,55 +513,62 @@ class FaceRecognitionWindow:
         self.lbl_system_status.pack(side=tk.RIGHT)
 
         # Viewport Display Container
-        viewport_frame = tk.Frame(
+        self.viewport_frame = tk.Frame(
             left_card,
-            bg="#030b18",
+            bg="#020813",
             bd=1,
             relief=tk.SOLID,
             highlightbackground="#1e3a5f",
             highlightthickness=1
         )
-        viewport_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
+        self.viewport_frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 8))
 
-        # Inner Scanner Illustration
+        # 1. Live Video Stream Label (Embedded directly into Tkinter Viewport)
+        self.lbl_video_feed = tk.Label(self.viewport_frame, bg="#020813")
+
+        # 2. Placeholder Container (Shown when camera is offline)
+        self.placeholder_frame = tk.Frame(self.viewport_frame, bg="#020813")
+        self.placeholder_frame.pack(fill=tk.BOTH, expand=True)
+
         icon_path = os.path.join(ASSETS_DIR, "tile_face.png")
+        photo_icon = None
         if os.path.exists(icon_path):
             try:
                 img_pil = Image.open(icon_path).resize((130, 130), Image.Resampling.LANCZOS)
                 photo_icon = ImageTk.PhotoImage(img_pil, master=self.root)
                 self._images.append(photo_icon)
-                lbl_reticle = tk.Label(viewport_frame, image=photo_icon, bg="#030b18")
-                lbl_reticle.pack(pady=(35, 12))
             except Exception:
-                lbl_reticle = tk.Label(viewport_frame, text="🎯", font=("Segoe UI", 48), fg="#10b981", bg="#030b18")
-                lbl_reticle.pack(pady=(35, 12))
+                pass
+
+        if photo_icon:
+            lbl_reticle = tk.Label(self.placeholder_frame, image=photo_icon, bg="#020813")
         else:
-            lbl_reticle = tk.Label(viewport_frame, text="🎯", font=("Segoe UI", 48), fg="#10b981", bg="#030b18")
-            lbl_reticle.pack(pady=(35, 12))
+            lbl_reticle = tk.Label(self.placeholder_frame, text="🎯", font=("Segoe UI", 48), fg="#10b981", bg="#020813")
+        lbl_reticle.pack(pady=(45, 12))
 
         lbl_instruct_main = tk.Label(
-            viewport_frame,
+            self.placeholder_frame,
             text="Position your face clearly in front of the camera",
             font=("Segoe UI", 13, "bold"),
             fg="#ffffff",
-            bg="#030b18"
+            bg="#020813"
         )
         lbl_instruct_main.pack(pady=(0, 4))
 
         lbl_instruct_sub = tk.Label(
-            viewport_frame,
-            text="Multi-frame stabilization is active. Look straight at the lens for instant verification.",
+            self.placeholder_frame,
+            text="Click 'START LIVE FACE SCAN' below to open real-time recognition.",
             font=("Segoe UI", 9),
             fg="#94a3b8",
-            bg="#030b18"
+            bg="#020813"
         )
         lbl_instruct_sub.pack(pady=(0, 20))
 
         # Hardware Specs Footer Strip inside Viewport
-        spec_strip = tk.Frame(viewport_frame, bg="#06152b", padx=12, pady=6)
-        spec_strip.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=12)
+        spec_strip = tk.Frame(left_card, bg="#06152b", padx=12, pady=6)
+        spec_strip.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(0, 10))
 
-        lbl_spec1 = tk.Label(spec_strip, text="📹 Video: 1280x720 HD", font=("Segoe UI", 8, "bold"), fg="#38bdf8", bg="#06152b")
+        lbl_spec1 = tk.Label(spec_strip, text="📹 Video: 720p HD + CLAHE", font=("Segoe UI", 8, "bold"), fg="#38bdf8", bg="#06152b")
         lbl_spec1.pack(side=tk.LEFT, padx=(4, 16))
 
         lbl_spec2 = tk.Label(spec_strip, text="⚡ Stabilizer: 7-Frame Voting", font=("Segoe UI", 8), fg="#cbd5e1", bg="#06152b")
@@ -527,18 +593,57 @@ class FaceRecognitionWindow:
         right_accent = tk.Frame(right_card, bg="#10b981", height=4)
         right_accent.pack(side=tk.TOP, fill=tk.X)
 
-        right_inner = tk.Frame(right_card, bg="#071a35", padx=18, pady=14)
+        right_inner = tk.Frame(right_card, bg="#071a35", padx=18, pady=12)
         right_inner.pack(fill=tk.BOTH, expand=True)
 
         # Section Heading
         lbl_right_title = tk.Label(
             right_inner,
-            text="⚡ Biometric Verification & Controls",
+            text="⚡ Biometric Verification & Telemetry",
             font=("Segoe UI", 12, "bold"),
             fg="#ffffff",
             bg="#071a35"
         )
-        lbl_right_title.pack(anchor="w", pady=(0, 12))
+        lbl_right_title.pack(anchor="w", pady=(0, 8))
+
+        # HD Clarity & Lighting Engine Control Strip
+        clarity_box = tk.Frame(
+            right_inner,
+            bg="#06152b",
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground="#1e3a5f",
+            highlightthickness=1,
+            padx=12,
+            pady=8
+        )
+        clarity_box.pack(fill=tk.X, pady=(0, 10))
+
+        clarity_top = tk.Frame(clarity_box, bg="#06152b")
+        clarity_top.pack(fill=tk.X, pady=(0, 4))
+
+        lbl_clarity_icon = tk.Label(
+            clarity_top,
+            text="✨ HD Clarity & Lighting Engine:",
+            font=("Segoe UI", 9, "bold"),
+            fg="#38bdf8",
+            bg="#06152b"
+        )
+        lbl_clarity_icon.pack(side=tk.LEFT)
+
+        combo_clarity = ttk.Combobox(
+            clarity_box,
+            textvariable=self.var_hd_boost,
+            font=("Segoe UI", 9),
+            state="readonly",
+            values=[
+                "Enhanced HD (Default)",
+                "High Sharpness / Vivid",
+                "Low Light & Shadow Boost",
+                "Natural / Raw Stream"
+            ]
+        )
+        combo_clarity.pack(fill=tk.X)
 
         # 1. Primary Action Button: "Start Face Scan ➔"
         self.btn_scan = tk.Button(
@@ -552,7 +657,7 @@ class FaceRecognitionWindow:
             cursor="hand2", 
             bd=0, 
             relief=tk.FLAT,
-            pady=12,
+            pady=10,
             command=self.toggle_face_recognition
         )
         self.btn_scan.pack(fill=tk.X, pady=(0, 10))
@@ -571,9 +676,9 @@ class FaceRecognitionWindow:
             highlightbackground="#1e3a5f",
             anchor="w",
             padx=12,
-            pady=8
+            pady=7
         )
-        self.lbl_live_log.pack(fill=tk.X, pady=(0, 14))
+        self.lbl_live_log.pack(fill=tk.X, pady=(0, 10))
 
         # 3. Real-Time Recognized Student Profile Card (HUD)
         self.recog_card = tk.Frame(
@@ -586,7 +691,7 @@ class FaceRecognitionWindow:
             padx=14, 
             pady=10
         )
-        self.recog_card.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+        self.recog_card.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
         lbl_recog_header = tk.Label(
             self.recog_card,
@@ -606,7 +711,7 @@ class FaceRecognitionWindow:
             bg="#06152b",
             anchor="w"
         )
-        self.lbl_recog_name.pack(fill=tk.X, pady=1)
+        self.lbl_recog_name.pack(fill=tk.X, pady=2)
 
         self.lbl_recog_roll = tk.Label(
             self.recog_card,
@@ -616,7 +721,7 @@ class FaceRecognitionWindow:
             bg="#06152b",
             anchor="w"
         )
-        self.lbl_recog_roll.pack(fill=tk.X, pady=1)
+        self.lbl_recog_roll.pack(fill=tk.X, pady=2)
 
         self.lbl_recog_dep = tk.Label(
             self.recog_card,
@@ -626,22 +731,22 @@ class FaceRecognitionWindow:
             bg="#06152b",
             anchor="w"
         )
-        self.lbl_recog_dep.pack(fill=tk.X, pady=1)
+        self.lbl_recog_dep.pack(fill=tk.X, pady=2)
 
         self.lbl_recog_time = tk.Label(
             self.recog_card,
             text="Timestamp:     --",
-            font=("Segoe UI", 10),
+            font=("Segoe UI", 9),
             fg="#94a3b8",
             bg="#06152b",
             anchor="w"
         )
-        self.lbl_recog_time.pack(fill=tk.X, pady=1)
+        self.lbl_recog_time.pack(fill=tk.X, pady=2)
 
         self.lbl_recog_match = tk.Label(
             self.recog_card,
-            text="Biometric Match: Waiting for scan...",
-            font=("Segoe UI", 9, "bold"),
+            text="Biometric Match: --",
+            font=("Segoe UI", 10, "bold"),
             fg="#10b981",
             bg="#06152b",
             anchor="w"
@@ -664,7 +769,7 @@ class FaceRecognitionWindow:
             bd=1,
             relief=tk.SOLID,
             highlightbackground="#1e3a5f",
-            pady=7,
+            pady=6,
             command=self.open_attendance_window
         )
         btn_att.pack(fill=tk.X, pady=(0, 6))
@@ -681,7 +786,7 @@ class FaceRecognitionWindow:
             activeforeground="#ffffff",
             cursor="hand2",
             bd=0,
-            pady=6,
+            pady=5,
             command=self.handle_back_or_close
         )
         btn_dashboard.pack(fill=tk.X)
@@ -698,9 +803,9 @@ class FaceRecognitionWindow:
             relief=tk.SOLID, 
             highlightbackground="#1e3a5f", 
             highlightthickness=1,
-            height=32
+            height=30
         )
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(4, 10))
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(4, 8))
 
         lbl_bot_status = tk.Label(
             status_bar,
@@ -709,7 +814,7 @@ class FaceRecognitionWindow:
             fg="#10b981",
             bg="#071a35"
         )
-        lbl_bot_status.pack(side=tk.LEFT, padx=16, pady=5)
+        lbl_bot_status.pack(side=tk.LEFT, padx=16, pady=4)
 
         lbl_bot_mentor = tk.Label(
             status_bar,
@@ -718,7 +823,7 @@ class FaceRecognitionWindow:
             fg="#94a3b8",
             bg="#071a35"
         )
-        lbl_bot_mentor.pack(side=tk.RIGHT, padx=16, pady=5)
+        lbl_bot_mentor.pack(side=tk.RIGHT, padx=16, pady=4)
 
     def open_attendance_window(self):
         """Opens Attendance Records window."""
@@ -746,6 +851,63 @@ class FaceRecognitionWindow:
         except Exception:
             pass
 
+    def _enhance_frame_clarity(self, frame, mode="Enhanced HD (Default)"):
+        """
+        Fast, real-time video clarity & lighting normalizer optimized for 60+ FPS.
+        """
+        if frame is None or frame.size == 0 or mode == "Natural / Raw Stream":
+            return frame
+
+        try:
+            if mode == "High Sharpness / Vivid":
+                # Fast 3x3 sharpening kernel
+                kernel = np.array([[0, -0.25, 0], [-0.25, 2.0, -0.25], [0, -0.25, 0]], dtype=np.float32)
+                sharpened = cv2.filter2D(frame, -1, kernel)
+                return cv2.convertScaleAbs(sharpened, alpha=1.08, beta=6)
+            elif mode == "Low Light & Shadow Boost":
+                # Fast Y-channel CLAHE in YCrCb
+                ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
+                y, cr, cb = cv2.split(ycrcb)
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                y_eq = clahe.apply(y)
+                merged = cv2.merge((y_eq, cr, cb))
+                return cv2.cvtColor(merged, cv2.COLOR_YCrCb2BGR)
+            else:  # "Enhanced HD (Default)"
+                # Fast SIMD contrast & brightness stretch
+                return cv2.convertScaleAbs(frame, alpha=1.10, beta=6)
+        except Exception:
+            return frame
+
+    def _display_frame_on_ui(self, rgb_frame):
+        """Thread-safe method to update the embedded Tkinter video label with crisp anti-aliased scaling."""
+        if not self.is_camera_running:
+            return
+        try:
+            # Measure viewport container size dynamically
+            v_w = self.viewport_frame.winfo_width()
+            v_h = self.viewport_frame.winfo_height()
+            
+            # Default fallback size if window not yet rendered
+            if v_w < 100 or v_h < 100:
+                v_w, v_h = 700, 480
+
+            f_h, f_w = rgb_frame.shape[:2]
+            scale = min(v_w / f_w, v_h / f_h)
+            new_w = max(10, int(f_w * scale))
+            new_h = max(10, int(f_h * scale))
+
+            # Resize with area/lanczos4 interpolation for crisp viewport display
+            if scale < 1.0:
+                resized_rgb = cv2.resize(rgb_frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            else:
+                resized_rgb = cv2.resize(rgb_frame, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+
+            pil_img = Image.fromarray(resized_rgb)
+            self._current_video_photo = ImageTk.PhotoImage(pil_img, master=self.root)
+            self.lbl_video_feed.config(image=self._current_video_photo)
+        except Exception:
+            pass
+
     def toggle_face_recognition(self):
         """Toggles the live camera capture and face recognition pipeline."""
         if self.is_camera_running:
@@ -753,6 +915,10 @@ class FaceRecognitionWindow:
             self.btn_scan.config(text="📷   START LIVE FACE SCAN   ➔", bg="#0084ff")
             self.lbl_system_status.config(text="● System Ready", fg="#10b981")
             self.lbl_live_log.config(text="● Face scanner stopped.", fg="#94a3b8")
+            
+            # Switch view back to placeholder
+            self.lbl_video_feed.pack_forget()
+            self.placeholder_frame.pack(fill=tk.BOTH, expand=True)
         else:
             # Step 1: Ensure LBPH model is ready and up-to-date
             ready, msg = ensure_classifier_ready()
@@ -765,6 +931,10 @@ class FaceRecognitionWindow:
             self.lbl_system_status.config(text="● Live Feed Active", fg="#ef4444")
             self.lbl_live_log.config(text="● Initializing camera stream...", fg="#38bdf8")
 
+            # Switch view to video feed
+            self.placeholder_frame.pack_forget()
+            self.lbl_video_feed.pack(fill=tk.BOTH, expand=True)
+
             # Launch OpenCV processing in background daemon thread
             self.camera_thread = threading.Thread(target=self._run_face_recognition_loop, daemon=True)
             self.camera_thread.start()
@@ -772,6 +942,7 @@ class FaceRecognitionWindow:
     def _run_face_recognition_loop(self):
         """
         Executes the high-performance OpenCV face detection and LBPH recognition loop.
+        Renders live frames directly into the embedded Tkinter viewport at 60+ FPS.
         """
         # Load Haar Cascade Classifier
         cascade_path = os.path.join(BASE_DIR, "haarcascade_frontalface_default.xml")
@@ -801,13 +972,25 @@ class FaceRecognitionWindow:
             except Exception:
                 pass
 
-        # Camera Acquisition Loop with Multi-Backend Negotiation
+        # Camera Acquisition Loop with Multi-Backend Negotiation & HD Resolution Request
         cap = None
         for backend in [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]:
             for idx in [0, 1, 2]:
                 try:
                     temp_cap = cv2.VideoCapture(idx, backend)
                     if temp_cap.isOpened():
+                        # Negotiate MJPG codec and HD resolution
+                        try:
+                            temp_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                        except Exception:
+                            pass
+                        try:
+                            temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                            temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                            temp_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        except Exception:
+                            pass
+                            
                         ret, test_frame = temp_cap.read()
                         if ret and test_frame is not None and test_frame.size > 0:
                             cap = temp_cap
@@ -824,6 +1007,7 @@ class FaceRecognitionWindow:
             self.is_camera_running = False
             self.root.after(0, lambda: self.btn_scan.config(text="📷   START LIVE FACE SCAN   ➔", bg="#0084ff"))
             self.root.after(0, lambda: self.lbl_system_status.config(text="● Camera Disconnected", fg="#ef4444"))
+            self.root.after(0, lambda: (self.lbl_video_feed.pack_forget(), self.placeholder_frame.pack(fill=tk.BOTH, expand=True)))
             return
 
         # Optimize Camera Buffering
@@ -834,18 +1018,9 @@ class FaceRecognitionWindow:
         except Exception:
             pass
 
-        # Camera Warm-up (10 frames)
-        for _ in range(10):
+        # Camera Warm-up (6 frames)
+        for _ in range(6):
             cap.read()
-
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        win_title = "FaceAttend - Live Biometric AI Face Recognition"
-        cv2.namedWindow(win_title, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(win_title, 960, 600)
-        try:
-            cv2.setWindowProperty(win_title, cv2.WND_PROP_TOPMOST, 1)
-        except Exception:
-            pass
 
         self.root.after(0, lambda: self.lbl_live_log.config(text="● Face scanner running (60+ FPS). Look at camera.", fg="#10b981"))
 
@@ -853,18 +1028,21 @@ class FaceRecognitionWindow:
         frame_counter = 0
         current_fps = 60.0
         
-        # Reset temporal tracker buffer for fresh session
-        self.face_tracker = TemporalFaceTracker(history_len=7, strict_threshold=72.0)
+        # Spatial multi-face tracking manager
+        tracker_manager = MultiFaceTrackerManager(max_distance=120.0, max_age_seconds=0.8)
 
         # Cache student info to prevent redundant SQL queries per frame
         student_cache = {}
 
         # Main Capture & Recognition Loop
         while self.is_camera_running:
-            ret, frame = cap.read()
-            if not ret or frame is None:
+            ret, raw_frame = cap.read()
+            if not ret or raw_frame is None:
                 time.sleep(0.01)
                 continue
+
+            # Real-Time HD Clarity & Adaptive Lighting Enhancement
+            frame = self._enhance_frame_clarity(raw_frame, mode=self.var_hd_boost.get())
 
             frame_counter += 1
             if time.time() - last_fps_time >= 1.0:
@@ -875,35 +1053,47 @@ class FaceRecognitionWindow:
             h_f, w_f = frame.shape[:2]
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-            # 3-Pass Adaptive Haar Detection
-            # Pass 1: 0.5x Downsampled Fast Detection
-            small_gray = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5)
-            faces = face_cascade.detectMultiScale(small_gray, scaleFactor=1.08, minNeighbors=3, minSize=(30, 30))
+            # Fast, Robust 1-Pass Face Detection on 0.5x Downsampled Frame
+            small_gray = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5, interpolation=cv2.INTER_LINEAR)
+            
+            # Calibrated parameters to ELIMINATE phantom curtain/wall detections:
+            # - scaleFactor: 1.15
+            # - minNeighbors: 6 (strictly eliminates background texture false positives)
+            # - minSize: (40, 40) on half-res (corresponds to 80x80px on 720p)
+            detected_raw = face_cascade.detectMultiScale(
+                small_gray,
+                scaleFactor=1.15,
+                minNeighbors=6,
+                minSize=(40, 40),
+                flags=cv2.CASCADE_SCALE_IMAGE
+            )
 
-            if len(faces) == 0:
-                # Pass 2: Full-Resolution Fallback
-                faces = face_cascade.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=3, minSize=(60, 60))
-                scale_up = False
-            else:
-                scale_up = True
+            # Filter valid faces by aspect ratio and scale back to original resolution
+            faces = []
+            for (sx, sy, sw, sh) in detected_raw:
+                aspect = sw / float(sh)
+                # Filter out tall skinny curtain folds or wide flat objects
+                if 0.70 <= aspect <= 1.35 and sw >= 35 and sh >= 35:
+                    faces.append((sx * 2, sy * 2, sw * 2, sh * 2))
 
-            if len(faces) == 0:
-                # Pass 3: CLAHE Low-Light Fallback
-                enhanced_gray = clahe.apply(gray)
-                faces = face_cascade.detectMultiScale(enhanced_gray, scaleFactor=1.08, minNeighbors=3, minSize=(60, 60))
-                scale_up = False
+            # Match detected faces to spatial trackers
+            tracker_map = tracker_manager.match_boxes_to_trackers(faces)
+
+            best_verified_face = None
+            max_conf = 0
 
             # Draw HUD Overlays on Detected Faces
-            for (x, y, w, h) in faces:
-                if scale_up:
-                    x, y, w, h = x * 2, y * 2, w * 2, h * 2
+            for idx, (x, y, w, h) in enumerate(faces):
+                face_tracker = tracker_map.get(idx)
+                if face_tracker is None:
+                    continue
 
                 # Exact zero-padding crop to match training dataset samples
                 face_raw = gray[y:y+h, x:x+w]
-                if face_raw.size == 0 or face_raw.shape[0] < 20 or face_raw.shape[1] < 20:
+                if face_raw.size == 0 or face_raw.shape[0] < 30 or face_raw.shape[1] < 30:
                     continue
 
-                face_resized = cv2.resize(face_raw, (200, 200))
+                face_resized = cv2.resize(face_raw, (200, 200), interpolation=cv2.INTER_LANCZOS4)
                 face_equalized = cv2.equalizeHist(face_resized)
 
                 # LBPH Machine Learning Prediction
@@ -921,84 +1111,118 @@ class FaceRecognitionWindow:
                 else:
                     s_info = student_cache[student_id]
 
-                # Update Temporal Tracker with multi-frame majority voting
-                is_verified, disp_name, disp_roll, disp_dep, conf_pct, status_str = self.face_tracker.update(
-                    student_id, distance, s_info
+                # Update per-face spatial tracker
+                is_verified, disp_name, disp_roll, disp_dep, conf_pct, status_str = face_tracker.update(
+                    student_id, distance, s_info, (x, y, w, h)
                 )
 
                 if is_verified:
-                    now = datetime.now()
-                    time_str = now.strftime("%I:%M:%S %p")
-                    date_str = now.strftime("%d/%m/%Y")
+                    if conf_pct > max_conf:
+                        max_conf = conf_pct
+                        best_verified_face = (student_id, disp_name, disp_roll, disp_dep, conf_pct, status_str)
 
-                    # Log attendance (SQLite + CSV) with daily deduplication
-                    if student_id not in self.logged_session_students:
-                        try:
-                            log_attendance(student_id, disp_roll, disp_name, disp_dep, time_str, date_str, "Present")
-                            log_attendance_to_csv(student_id, disp_roll, disp_name, disp_dep, time_str, date_str, "Present")
-                            self.logged_session_students.add(student_id)
-                        except Exception:
-                            pass
-
-                    self.root.after(0, lambda n=disp_name, r=disp_roll, t=time_str, d=disp_dep, c=status_str: self._update_live_ui_log(n, r, t, d, c))
-
-                    # Render Green HUD Box with Corner Brackets
-                    box_color = (0, 255, 120)  # Neon Green
+                    # 1. Render Neon Green HUD Bounding Box
+                    box_color = (0, 255, 120)
                     cv2.rectangle(frame, (x, y), (x + w, y + h), box_color, 2)
                     
-                    # Corner accents
-                    c_len = min(24, w // 4)
-                    cv2.line(frame, (x, y), (x + c_len, y), (0, 255, 255), 4)
-                    cv2.line(frame, (x, y), (x, y + c_len), (0, 255, 255), 4)
-                    cv2.line(frame, (x + w, y), (x + w - c_len, y), (0, 255, 255), 4)
-                    cv2.line(frame, (x + w, y), (x + w, y + c_len), (0, 255, 255), 4)
-                    cv2.line(frame, (x, y + h), (x + c_len, y + h), (0, 255, 255), 4)
-                    cv2.line(frame, (x, y + h), (x, y + h - c_len), (0, 255, 255), 4)
-                    cv2.line(frame, (x + w, y + h), (x + w - c_len, y + h), (0, 255, 255), 4)
-                    cv2.line(frame, (x + w, y + h), (x + w, y + h - c_len), (0, 255, 255), 4)
+                    # Corner accents (Cyan)
+                    c_len = min(22, w // 4)
+                    cv2.line(frame, (x, y), (x + c_len, y), (0, 240, 255), 3)
+                    cv2.line(frame, (x, y), (x, y + c_len), (0, 240, 255), 3)
+                    cv2.line(frame, (x + w, y), (x + w - c_len, y), (0, 240, 255), 3)
+                    cv2.line(frame, (x + w, y), (x + w, y + c_len), (0, 240, 255), 3)
+                    cv2.line(frame, (x, y + h), (x + c_len, y + h), (0, 240, 255), 3)
+                    cv2.line(frame, (x, y + h), (x, y + h - c_len), (0, 240, 255), 3)
+                    cv2.line(frame, (x + w, y + h), (x + w - c_len, y + h), (0, 240, 255), 3)
+                    cv2.line(frame, (x + w, y + h), (x + w, y + h - c_len), (0, 240, 255), 3)
 
-                    # Info Label Badge
-                    label_text = f"{disp_name} | {disp_roll}"
-                    cv2.rectangle(frame, (x, y - 36), (x + max(220, w), y), (10, 30, 15), -1)
-                    cv2.rectangle(frame, (x, y - 36), (x + max(220, w), y), box_color, 1)
-                    cv2.putText(frame, label_text, (x + 6, y - 18), cv2.FONT_HERSHEY_DUPLEX, 0.55, (255, 255, 255), 1)
-                    cv2.putText(frame, f"Conf: {conf_pct}% (Verified)", (x + 6, y - 4), cv2.FONT_HERSHEY_DUPLEX, 0.42, (0, 255, 120), 1)
+                    # 2. Dynamic Collision-Free Info Badge Positioning
+                    # If face is near the top edge (y < 45), draw label BELOW the face box
+                    badge_w = max(200, w)
+                    bx1 = max(0, min(x, w_f - badge_w))
+                    bx2 = bx1 + badge_w
+
+                    if y < 45:
+                        by1 = y + h
+                        by2 = min(h_f - 28, y + h + 38)
+                        ty1 = y + h + 16
+                        ty2 = y + h + 30
+                    else:
+                        by1 = max(34, y - 38)
+                        by2 = y
+                        ty1 = y - 22
+                        ty2 = y - 8
+
+                    cv2.rectangle(frame, (bx1, by1), (bx2, by2), (8, 24, 15), -1)
+                    cv2.rectangle(frame, (bx1, by1), (bx2, by2), box_color, 1)
+                    
+                    label_title = f"{disp_name} | {disp_roll}"
+                    if len(label_title) > 26:
+                        label_title = label_title[:24] + ".."
+                    cv2.putText(frame, label_title, (bx1 + 6, ty1), cv2.FONT_HERSHEY_DUPLEX, 0.46, (255, 255, 255), 1, cv2.LINE_AA)
+                    cv2.putText(frame, f"Match: {conf_pct}% (Verified)", (bx1 + 6, ty2), cv2.FONT_HERSHEY_DUPLEX, 0.40, (0, 255, 120), 1, cv2.LINE_AA)
 
                 else:
-                    # Unknown Face (Red HUD)
-                    box_color = (0, 0, 230)
+                    # Unknown Face / Scanning (Red HUD)
+                    box_color = (0, 0, 225)
                     cv2.rectangle(frame, (x, y), (x + w, y + h), box_color, 2)
-                    cv2.rectangle(frame, (x, y - 28), (x + max(160, w), y), (20, 10, 10), -1)
-                    cv2.rectangle(frame, (x, y - 28), (x + max(160, w), y), box_color, 1)
-                    cv2.putText(frame, "Unknown Face", (x + 6, y - 8), cv2.FONT_HERSHEY_DUPLEX, 0.55, (0, 0, 255), 1)
+                    
+                    badge_w = max(140, w)
+                    bx1 = max(0, min(x, w_f - badge_w))
+                    bx2 = bx1 + badge_w
 
-            # Top HUD Status Bar on Video Stream
-            cv2.rectangle(frame, (0, 0), (w_f, 36), (8, 20, 35), -1)
-            cv2.line(frame, (0, 36), (w_f, 36), (0, 132, 255), 2)
-            cv2.putText(frame, "FACEATTEND BIOMETRIC SCANNER  |  TEMPORAL STABILIZATION ACTIVE", (15, 24), cv2.FONT_HERSHEY_DUPLEX, 0.50, (0, 210, 255), 1)
-            cv2.putText(frame, f"FPS: {current_fps:.1f}", (w_f - 110, 24), cv2.FONT_HERSHEY_DUPLEX, 0.52, (52, 211, 153), 1)
+                    if y < 35:
+                        by1 = y + h
+                        by2 = min(h_f - 28, y + h + 24)
+                        ty = y + h + 17
+                    else:
+                        by1 = max(34, y - 24)
+                        by2 = y
+                        ty = y - 7
 
-            # Bottom Controls Guidance Strip on Video Stream
-            cv2.rectangle(frame, (0, h_f - 30), (w_f, h_f), (8, 20, 35), -1)
-            cv2.putText(frame, "Press 'Q' or 'ESC' on keyboard to stop scanning.", (15, h_f - 10), cv2.FONT_HERSHEY_DUPLEX, 0.45, (148, 163, 184), 1)
+                    cv2.rectangle(frame, (bx1, by1), (bx2, by2), (25, 8, 8), -1)
+                    cv2.rectangle(frame, (bx1, by1), (bx2, by2), box_color, 1)
+                    cv2.putText(frame, "Unknown Face", (bx1 + 6, ty), cv2.FONT_HERSHEY_DUPLEX, 0.44, (0, 80, 255), 1, cv2.LINE_AA)
 
-            cv2.imshow(win_title, frame)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q') or key == 27:
-                break
+            # Update Attendance & UI Telemetry for highest confidence verified face
+            if best_verified_face is not None:
+                b_sid, b_name, b_roll, b_dep, b_conf, b_status = best_verified_face
+                now = datetime.now()
+                time_str = now.strftime("%I:%M:%S %p")
+                date_str = now.strftime("%d/%m/%Y")
 
-            # Handle OpenCV window X button click
-            if cv2.getWindowProperty(win_title, cv2.WND_PROP_VISIBLE) < 1:
-                break
+                if b_sid not in self.logged_session_students:
+                    try:
+                        log_attendance(b_sid, b_roll, b_name, b_dep, time_str, date_str, "Present")
+                        log_attendance_to_csv(b_sid, b_roll, b_name, b_dep, time_str, date_str, "Present")
+                        self.logged_session_students.add(b_sid)
+                    except Exception:
+                        pass
+
+                self.root.after(0, lambda n=b_name, r=b_roll, t=time_str, d=b_dep, c=b_status: self._update_live_ui_log(n, r, t, d, c))
+            cv2.rectangle(frame, (0, 0), (w_f, 32), (6, 18, 32), -1)
+            cv2.line(frame, (0, 32), (w_f, 32), (0, 132, 255), 2)
+            cv2.putText(frame, "FACEATTEND BIOMETRIC SCANNER", (14, 21), cv2.FONT_HERSHEY_DUPLEX, 0.46, (0, 210, 255), 1, cv2.LINE_AA)
+            cv2.putText(frame, f"FPS: {current_fps:.1f}", (w_f - 90, 21), cv2.FONT_HERSHEY_DUPLEX, 0.46, (52, 211, 153), 1, cv2.LINE_AA)
+
+            # Bottom Guidance Strip
+            cv2.rectangle(frame, (0, h_f - 24), (w_f, h_f), (6, 18, 32), -1)
+            cv2.putText(frame, "Live Biometric AI Active  •  Anti-Flicker Multi-Frame Consensus", (14, h_f - 7), cv2.FONT_HERSHEY_DUPLEX, 0.40, (148, 163, 184), 1, cv2.LINE_AA)
+
+            # Convert BGR to RGB and push to Tkinter embedded canvas
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            self.root.after(0, lambda f=rgb_frame: self._display_frame_on_ui(f))
+
+            time.sleep(0.015)  # Yield CPU (~60 FPS cap)
 
         # Cleanup and Release Camera
         cap.release()
-        cv2.destroyAllWindows()
         self.is_camera_running = False
 
         self.root.after(0, lambda: self.btn_scan.config(text="📷   START LIVE FACE SCAN   ➔", bg="#0084ff"))
         self.root.after(0, lambda: self.lbl_system_status.config(text="● System Ready", fg="#10b981"))
         self.root.after(0, lambda: self.lbl_live_log.config(text="● Face scanner stopped. Ready for next session.", fg="#94a3b8"))
+        self.root.after(0, lambda: (self.lbl_video_feed.pack_forget(), self.placeholder_frame.pack(fill=tk.BOTH, expand=True)))
 
     def handle_back_or_close(self):
         """Cleanly terminates camera loop and destroys window."""

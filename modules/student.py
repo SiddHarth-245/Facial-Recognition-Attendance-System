@@ -726,15 +726,14 @@ class StudentManagementSystem:
 
     def _capture_samples_worker(self, student_id: str, name: str):
         """Background worker thread capturing 100 standardized 200x200 face images."""
-        base_dir = os.path.dirname(os.path.abspath(__file__))
         candidates = [
-            os.path.join(base_dir, "haarcascade_frontalface_default.xml"),
-            os.path.join(base_dir, "classifier", "haarcascade_frontalface_default.xml"),
+            os.path.join(BASE_DIR, "haarcascade_frontalface_default.xml"),
+            os.path.join(BASE_DIR, "classifier", "haarcascade_frontalface_default.xml"),
             os.path.join(getattr(cv2.data, 'haarcascades', ''), "haarcascade_frontalface_default.xml")
         ]
         face_classifier = None
         for p in candidates:
-            if os.path.exists(p) and os.path.getsize(p) > 10000:
+            if p and os.path.exists(p) and os.path.getsize(p) > 10000:
                 c = cv2.CascadeClassifier(p)
                 if not c.empty():
                     face_classifier = c
@@ -760,6 +759,17 @@ class StudentManagementSystem:
                 if not temp_cap.isOpened():
                     temp_cap.release()
                     continue
+
+                try:
+                    temp_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                except Exception:
+                    pass
+                try:
+                    temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                    temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                    temp_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
 
                 success = False
                 for _ in range(15):
@@ -794,6 +804,7 @@ class StudentManagementSystem:
         except Exception:
             pass
 
+        clahe_engine = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         consecutive_empty = 0
 
         while True:
@@ -808,7 +819,9 @@ class StudentManagementSystem:
             consecutive_empty = 0
             
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = face_classifier.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(40, 40))
+            # Apply CLAHE for enhanced facial edge detection in varying lighting
+            enhanced_gray = clahe_engine.apply(gray)
+            faces = face_classifier.detectMultiScale(enhanced_gray, scaleFactor=1.1, minNeighbors=4, minSize=(40, 40))
 
             for (x, y, w, h) in faces:
                 sample_count += 1
@@ -816,12 +829,14 @@ class StudentManagementSystem:
                 if face_raw.size == 0:
                     continue
                 
-                face_crop = cv2.equalizeHist(cv2.resize(face_raw, (200, 200)))
+                # High-fidelity Lanczos4 normalization + Histogram Equalization
+                face_resized = cv2.resize(face_raw, (200, 200), interpolation=cv2.INTER_LANCZOS4)
+                face_crop = cv2.equalizeHist(face_resized)
                 file_name = f"user.{student_id}.{sample_count}.jpg"
                 file_path = os.path.join(DATA_DIR, file_name)
                 cv2.imwrite(file_path, face_crop)
 
-                display_crop = cv2.resize(face_crop, (450, 450))
+                display_crop = cv2.resize(face_crop, (450, 450), interpolation=cv2.INTER_CUBIC)
                 display_bgr = cv2.cvtColor(display_crop, cv2.COLOR_GRAY2BGR)
                 cv2.rectangle(display_bgr, (0, 0), (450, 80), (20, 20, 30), -1)
                 cv2.putText(display_bgr, f"Sample: {sample_count}/{max_samples}", (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 255, 0), 2)
