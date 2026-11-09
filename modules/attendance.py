@@ -53,6 +53,15 @@ from database.db_manager import (
     fetch_all_attendance,
     log_attendance,
     update_attendance_record,
+    delete_attendance_record,
+    get_student_by_roll,
+    get_student_by_id,
+)
+
+# Automated email notifier utilities
+from utils.email_notifier import (
+    send_attendance_email_async,
+    open_email_config_dialog,
 )
 
 # Filesystem directories and paths
@@ -299,7 +308,7 @@ class AttendanceManagementSystem:
         combo_status.grid(row=3, column=1, padx=6, pady=10)
 
         # -------------------------------------------------------------------------
-        # Action Buttons Bar: Import CSV, Export CSV, Update, Reset
+        # Action Buttons Bar: Import CSV, Export CSV, Update, Delete, Reset
         # -------------------------------------------------------------------------
         btn_bar = tk.Frame(left_box, bg="#071a35")
         btn_bar.pack(fill=tk.X, padx=10, pady=(6, 12))
@@ -311,10 +320,59 @@ class AttendanceManagementSystem:
             "cursor": "hand2"
         }
 
-        tk.Button(btn_bar, text="📥 Import CSV", bg="#0084ff", fg="#ffffff", activebackground="#006cd4", activeforeground="#ffffff", command=self.handle_import_csv, **btn_base).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=3, ipady=6)
-        tk.Button(btn_bar, text="📤 Export CSV", bg="#10b981", fg="#ffffff", activebackground="#059669", activeforeground="#ffffff", command=self.handle_export_csv, **btn_base).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=3, ipady=6)
-        tk.Button(btn_bar, text="🔄 Update", bg="#0284c7", fg="#ffffff", activebackground="#0369a1", activeforeground="#ffffff", command=self.handle_update, **btn_base).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=3, ipady=6)
-        tk.Button(btn_bar, text="↺ Reset", bg="#334155", fg="#ffffff", activebackground="#475569", activeforeground="#ffffff", command=self.handle_reset, **btn_base).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=3, ipady=6)
+        tk.Button(btn_bar, text="📥 Import CSV", bg="#0084ff", fg="#ffffff", activebackground="#006cd4", activeforeground="#ffffff", command=self.handle_import_csv, **btn_base).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=6)
+        tk.Button(btn_bar, text="📤 Export CSV", bg="#10b981", fg="#ffffff", activebackground="#059669", activeforeground="#ffffff", command=self.handle_export_csv, **btn_base).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=6)
+        tk.Button(btn_bar, text="🔄 Update", bg="#0284c7", fg="#ffffff", activebackground="#0369a1", activeforeground="#ffffff", command=self.handle_update, **btn_base).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=6)
+        tk.Button(btn_bar, text="🗑 Delete", bg="#dc2626", fg="#ffffff", activebackground="#b91c1c", activeforeground="#ffffff", command=self.handle_delete, **btn_base).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=6)
+        tk.Button(btn_bar, text="↺ Reset", bg="#334155", fg="#ffffff", activebackground="#475569", activeforeground="#ffffff", command=self.handle_reset, **btn_base).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=6)
+
+        # Secondary Notification & Configuration Bar
+        btn_bar2 = tk.Frame(left_box, bg="#071a35")
+        btn_bar2.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        tk.Button(
+            btn_bar2, 
+            text="📢 Notify Absent Students", 
+            bg="#e11d48", 
+            fg="#ffffff", 
+            activebackground="#be123c", 
+            activeforeground="#ffffff", 
+            command=self.handle_notify_absent_parents, 
+            **btn_base
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=5)
+
+        tk.Button(
+            btn_bar2, 
+            text="✉ Email Parent", 
+            bg="#0284c7", 
+            fg="#ffffff", 
+            activebackground="#0369a1", 
+            activeforeground="#ffffff", 
+            command=self.handle_email_selected_parent, 
+            **btn_base
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=5)
+
+        tk.Button(
+            btn_bar2, 
+            text="🧪 Test Email Config", 
+            bg="#0d9488", 
+            fg="#ffffff", 
+            activebackground="#0f766e", 
+            activeforeground="#ffffff", 
+            command=lambda: open_email_config_dialog(self.root), 
+            **btn_base
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=5)
+
+        tk.Button(
+            btn_bar2, 
+            text="⚙ Settings", 
+            bg="#4f46e5", 
+            fg="#ffffff", 
+            activebackground="#4338ca", 
+            activeforeground="#ffffff", 
+            command=lambda: open_email_config_dialog(self.root), 
+            **btn_base
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2, ipady=5)
 
         # =========================================================================
         # RIGHT SECTION: Attendance Records Table
@@ -375,27 +433,33 @@ class AttendanceManagementSystem:
         self.root.after(1000, self.update_clock)
 
     def load_attendance_from_csv(self):
-        """Loads records from `attendance_records/attendance.csv` into Treeview table."""
+        """
+        Loads records directly from SQLite as the single source of truth into Treeview table,
+        and synchronizes attendance_records/attendance.csv flat file to prevent inconsistencies.
+        """
         self.attendance_table.delete(*self.attendance_table.get_children())
         self.current_csv_data = []
 
-        if os.path.exists(DEFAULT_CSV):
-            try:
-                with open(DEFAULT_CSV, "r", newline="", encoding="utf-8") as f:
-                    reader = csv.reader(f)
-                    headers = next(reader, None)
-                    for row in reader:
-                        if row:
-                            self.current_csv_data.append(row)
-                            self.attendance_table.insert("", tk.END, values=row)
-            except Exception:
-                pass
-        else:
+        try:
+            # Query authoritative records from SQLite
             rows = fetch_all_attendance()
             for r in rows:
-                row_val = [r[0], r[2], r[3], r[4], r[5], r[6], r[7]]
+                # Format: [attendance_id, roll, name, department, time, date, status]
+                row_val = [str(r[0]), str(r[2]), str(r[3]), str(r[4]), str(r[5]), str(r[6]), str(r[7])]
                 self.current_csv_data.append(row_val)
                 self.attendance_table.insert("", tk.END, values=row_val)
+
+            # Sync SQLite records to default CSV to maintain flat-file consistency
+            try:
+                with open(DEFAULT_CSV, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Attendance ID", "Roll", "Name", "Department", "Time", "Date", "Attendance"])
+                    for row in self.current_csv_data:
+                        writer.writerow(row)
+            except Exception as sync_err:
+                print(f"[Attendance] CSV synchronization warning: {sync_err}")
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Failed to load attendance records: {str(e)}", parent=self.root)
 
     def handle_row_selection(self, event):
         """Populates the left input form with values from the selected table row."""
@@ -423,9 +487,15 @@ class AttendanceManagementSystem:
         self.var_status.set("Present")
 
     def handle_update(self):
-        """Updates the attendance status ('Present'/'Absent') in both SQLite and CSV records."""
+        """Updates the attendance status ('Present'/'Absent') in SQLite and CSV, and notifies parent."""
         att_id = self.var_attendance_id.get().strip()
         status = self.var_status.get().strip()
+        roll = self.var_roll.get().strip()
+        name = self.var_name.get().strip()
+        dep = self.var_dep.get().strip()
+        time_str = self.var_time.get().strip() or datetime.now().strftime("%I:%M:%S %p")
+        date_str = self.var_date.get().strip() or datetime.now().strftime("%d/%m/%Y")
+
         if not att_id:
             messagebox.showerror("Error", "Please select a record from the table to update!", parent=self.root)
             return
@@ -449,9 +519,229 @@ class AttendanceManagementSystem:
                     writer.writerows(updated_data)
 
             self.load_attendance_from_csv()
-            messagebox.showinfo("Success", "Attendance record updated successfully!", parent=self.root)
+
+            # Automatic Parent Email Notification upon Attendance Status Update
+            email_feedback = ""
+            try:
+                s_profile = get_student_by_roll(roll) if roll else None
+                if not s_profile and att_id:
+                    s_profile = get_student_by_id(att_id)
+                
+                s_id = str(s_profile.get("student_id", att_id)) if s_profile else str(att_id)
+                parent_email = (s_profile.get("parent_email", "") if s_profile else "").strip()
+                if parent_email:
+                    send_attendance_email_async(
+                        student_id=s_id,
+                        student_name=name or (s_profile.get("name", "Student") if s_profile else "Student"),
+                        roll=roll or (s_profile.get("roll", "N/A") if s_profile else "N/A"),
+                        department=dep or (s_profile.get("dep", "General") if s_profile else "General"),
+                        date_str=date_str,
+                        time_str=time_str,
+                        status=status,
+                        parent_email=parent_email
+                    )
+                    email_feedback = f"\n\n✉ Parent Notification:\nDispatched status '{status}' to parent email: {parent_email}"
+                else:
+                    email_feedback = "\n\n(Notice: No parent email registered for this student profile)."
+            except Exception as em_err:
+                email_feedback = f"\n\n(Parent email notice: {em_err})"
+
+            messagebox.showinfo(
+                "Success", 
+                f"Attendance record #{att_id} updated to '{status}' successfully!{email_feedback}", 
+                parent=self.root
+            )
         except Exception as e:
             messagebox.showerror("Error", str(e), parent=self.root)
+
+    def handle_delete(self):
+        """Permanently deletes the selected attendance record from SQLite and CSV."""
+        att_id = self.var_attendance_id.get().strip() or self.var_employee_id.get().strip()
+        roll = self.var_roll.get().strip()
+        name = self.var_name.get().strip()
+
+        # If not populated in form variables, inspect treeview selection
+        if not att_id:
+            selected = self.attendance_table.selection()
+            if selected:
+                vals = self.attendance_table.item(selected[0]).get("values", [])
+                if vals:
+                    att_id = str(vals[0]).strip()
+                    roll = str(vals[1]).strip() if len(vals) > 1 else roll
+                    name = str(vals[2]).strip() if len(vals) > 2 else name
+
+        if not att_id:
+            messagebox.showerror(
+                "Selection Error", 
+                "Please select an attendance record from the table to delete!", 
+                parent=self.root
+            )
+            return
+
+        confirm_msg = f"Are you sure you want to permanently delete attendance record #{att_id}"
+        if name or roll:
+            confirm_msg += f" for student '{name}' (Roll: {roll})?"
+        else:
+            confirm_msg += "?"
+
+        if not messagebox.askyesno("Confirm Deletion", confirm_msg, parent=self.root):
+            return
+
+        try:
+            # 1. Delete from SQLite database
+            db_success, db_msg = delete_attendance_record(int(att_id))
+
+            # 2. Delete from attendance.csv
+            csv_found = False
+            if os.path.exists(DEFAULT_CSV):
+                remaining_rows = []
+                with open(DEFAULT_CSV, "r", newline="", encoding="utf-8") as f:
+                    reader = csv.reader(f)
+                    headers = next(reader, None)
+                    for row in reader:
+                        if row:
+                            if str(row[0]).strip() == str(att_id):
+                                csv_found = True
+                            else:
+                                remaining_rows.append(row)
+
+                with open(DEFAULT_CSV, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    if headers:
+                        writer.writerow(headers)
+                    writer.writerows(remaining_rows)
+
+            if not db_success and not csv_found:
+                messagebox.showerror("Error", f"Failed to delete record: {db_msg}", parent=self.root)
+                return
+
+            # 3. Reload table & reset form
+            self.load_attendance_from_csv()
+            self.handle_reset()
+
+            messagebox.showinfo(
+                "Success", 
+                f"Attendance record #{att_id} deleted successfully from database and CSV!", 
+                parent=self.root
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"An error occurred while deleting: {str(e)}", parent=self.root)
+
+    def handle_notify_absent_parents(self):
+        """Scans current attendance records for 'Absent' students and dispatches automated parent alerts via Brevo."""
+        absent_count = 0
+        notified_count = 0
+        missing_email_count = 0
+
+        now = datetime.now()
+        date_str = now.strftime("%d/%m/%Y")
+        time_str = now.strftime("%I:%M:%S %p")
+
+        # Iterate over records currently loaded in the Treeview table
+        for item in self.attendance_table.get_children():
+            row = self.attendance_table.item(item).get("values")
+            if not row or len(row) < 7:
+                continue
+            
+            att_id, roll, name, dep, rec_time, rec_date, status = row[:7]
+            if str(status).strip().lower() == "absent":
+                absent_count += 1
+                s_profile = get_student_by_roll(str(roll)) if roll else None
+                if not s_profile and att_id:
+                    s_profile = get_student_by_id(str(att_id))
+                
+                s_id = str(s_profile.get("student_id", att_id)) if s_profile else str(att_id)
+                parent_email = (s_profile.get("parent_email", "") if s_profile else "").strip()
+                if parent_email:
+                    send_attendance_email_async(
+                        student_id=s_id,
+                        student_name=str(name),
+                        roll=str(roll),
+                        department=str(dep),
+                        date_str=str(rec_date) or date_str,
+                        time_str=str(rec_time) or time_str,
+                        status="ABSENT",
+                        parent_email=parent_email
+                    )
+                    notified_count += 1
+                else:
+                    missing_email_count += 1
+
+        if absent_count == 0:
+            messagebox.showinfo("Absentee Scan", "No 'Absent' student records found in the current log.", parent=self.root)
+        else:
+            messagebox.showinfo(
+                "Absentee Notifications Queued",
+                f"Total Absent Records Found: {absent_count}\n"
+                f"Parent Notifications Queued: {notified_count}\n"
+                f"Records Missing Parent Email: {missing_email_count}\n\n"
+                f"All alerts are dispatched asynchronously via the Brevo API.\n"
+                f"Duplicate prevention ensures parents only receive one alert per day.\n"
+                f"Audit logs available at attendance_records/email_notifications.log",
+                parent=self.root
+            )
+
+    def handle_email_selected_parent(self):
+        """Sends an attendance notification email to the parent of the currently selected record via Brevo API."""
+        roll = self.var_roll.get().strip()
+        att_id = self.var_attendance_id.get().strip()
+        name = self.var_name.get().strip()
+        status = self.var_status.get().strip() or "PRESENT"
+        dep = self.var_dep.get().strip()
+        date_str = self.var_date.get().strip() or datetime.now().strftime("%d/%m/%Y")
+        time_str = self.var_time.get().strip() or datetime.now().strftime("%I:%M:%S %p")
+
+        if not roll and not att_id:
+            messagebox.showwarning(
+                "Select Record",
+                "Please select an attendance record from the table first to email their parent.",
+                parent=self.root
+            )
+            return
+
+        s_profile = get_student_by_roll(roll) if roll else None
+        if not s_profile and att_id:
+            s_profile = get_student_by_id(att_id)
+
+        s_id = str(s_profile.get("student_id", att_id)) if s_profile else str(att_id)
+        parent_email = (s_profile.get("parent_email", "") if s_profile else "").strip()
+        if not parent_email:
+            messagebox.showwarning(
+                "Parent Email Missing",
+                f"Student '{name or roll}' does not have a registered Parent Email in the database.\n\n"
+                f"You can add a Parent Email in the Student Details section.",
+                parent=self.root
+            )
+            return
+
+        try:
+            from utils.email_notifier import send_parent_attendance_notification
+            # Allow manual user action with force=True so administrators can explicitly re-notify
+            ok, msg, outcome = send_parent_attendance_notification(
+                student_id=s_id,
+                roll=roll or (s_profile.get("roll", "") if s_profile else ""),
+                student_name=name or (s_profile.get("name", "Student") if s_profile else "Student"),
+                dep=dep or (s_profile.get("dep", "") if s_profile else "Computer Science"),
+                date_str=date_str,
+                time_str=time_str,
+                status=status,
+                parent_email=parent_email,
+                force=True
+            )
+            if ok:
+                messagebox.showinfo(
+                    "Email Accepted by Brevo",
+                    f"Attendance notification successfully accepted by Brevo API!\n\n"
+                    f"• Recipient: {parent_email}\n"
+                    f"• Student: {name} (Roll: {roll})\n"
+                    f"• Status: {status.upper()}\n\n"
+                    f"{msg}",
+                    parent=self.root
+                )
+            else:
+                messagebox.showerror("Delivery Error", f"Failed to send email:\n\n{msg}", parent=self.root)
+        except Exception as ex:
+            messagebox.showerror("Error", f"Transmission error: {ex}", parent=self.root)
 
     def handle_import_csv(self):
         """Prompts user to select an external CSV file, parses rows, and writes them to SQLite."""
@@ -480,9 +770,18 @@ class AttendanceManagementSystem:
             messagebox.showerror("Error", f"Failed to import CSV: {e}", parent=self.root)
 
     def handle_export_csv(self):
-        """Exports the current attendance table dataset into a user-specified CSV spreadsheet."""
-        if not self.current_csv_data:
-            messagebox.showwarning("Warning", "No attendance records to export.", parent=self.root)
+        """
+        Exports authoritative attendance records directly from SQLite into a user-specified CSV spreadsheet.
+        Displays explicit, user-friendly error messages if the export fails.
+        """
+        try:
+            db_records = fetch_all_attendance()
+        except Exception as err:
+            messagebox.showerror("Database Error", f"Could not retrieve attendance records from database:\n{str(err)}", parent=self.root)
+            return
+
+        if not db_records:
+            messagebox.showwarning("Warning", "No attendance records found in database to export.", parent=self.root)
             return
 
         file_path = filedialog.asksaveasfilename(
@@ -498,13 +797,20 @@ class AttendanceManagementSystem:
         try:
             with open(file_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["Attendance ID", "Roll", "Name", "Department", "Time", "Date", "Attendance"])
-                for row in self.current_csv_data:
-                    writer.writerow(row)
+                writer.writerow(["Attendance ID", "Student ID", "Roll", "Name", "Department", "Time", "Date", "Status"])
+                for r in db_records:
+                    writer.writerow([r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]])
+                f.flush()
 
-            messagebox.showinfo("Success", f"Attendance data successfully exported to:\n{file_path}", parent=self.root)
+            messagebox.showinfo(
+                "Export Successful", 
+                f"Successfully exported {len(db_records)} record(s) from SQLite to:\n{file_path}", 
+                parent=self.root
+            )
+        except (IOError, PermissionError, OSError) as e:
+            messagebox.showerror("Export Failed", f"File system error writing CSV file:\n\n{str(e)}\n\nPlease ensure you have write permissions and the file is not currently open in Excel.", parent=self.root)
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to export CSV: {e}", parent=self.root)
+            messagebox.showerror("Export Failed", f"Unexpected error during CSV export:\n\n{str(e)}", parent=self.root)
 
 
 if __name__ == "__main__":

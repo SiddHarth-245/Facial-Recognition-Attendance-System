@@ -28,11 +28,11 @@ Key System Capabilities:
 4. Standardized Zero-Padding Crop Matching:
    - Matches the 0% bounding box crop (`gray[y:y+h, x:x+w]`) used during dataset acquisition,
      preventing grid-cell spatial misalignment in LBPH 8x8 histograms.
-5. Calibrated Two-Tier Distance Thresholding:
-   - High Confidence Match: `distance <= 60.0` (85% - 99% accuracy) -> Instant Green HUD.
-   - Verified Match: `60.0 < distance <= 72.0` -> Confirmed after majority vote consensus.
-   - Rejection Boundary: `distance > 72.0` -> Marked as 'Unknown Face' (Red HUD), preventing false
-     swaps with other students.
+5. Calibrated Multi-Tier Distance Thresholding:
+   - High Confidence Match: `distance <= 50.0` (75% - 99% accuracy) -> Instant Green HUD.
+   - Verified Match: `50.0 < distance <= 78.0` -> Confirmed after majority vote consensus.
+   - Rejection Boundary: `distance > 78.0` -> Marked as 'Unknown Face' (Red HUD), preventing false
+     swaps with other students. Configurable via UI selector (70.0 - 82.0).
 6. Dual-Persistence Attendance & Daily Deduplication:
    - Records attendance synchronously to SQLite database and CSV file with daily deduplication.
 ========================================================================================
@@ -71,7 +71,11 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 # Database operations for student info resolution and attendance recording
-from database.db_manager import get_student_by_id, log_attendance
+from database.db_manager import get_student_by_id, log_attendance, is_student_marked_today
+from utils.liveness_detector import (
+    LivenessChallengeSession, LivenessAction, ACTION_TITLES, ACTION_ICONS, ACTION_INSTRUCTIONS
+)
+from utils.email_notifier import send_attendance_email_async
 
 # Filesystem directory paths
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
@@ -220,8 +224,20 @@ class SpatialFaceTracker:
     """
     Per-Face Spatial Temporal Stabilizer & Identity Consensus Engine.
     Maintains independent majority-voting history for each distinct face.
+
+    Biometric & Recognition Safeguards:
+    -----------------------------------
+    1. Metric Clarification: LBPH produces an uncalibrated chi-square distance between
+       Local Binary Pattern texture histograms. Lower distance indicates greater similarity.
+       Calculated match scores (0-100) are relative matching metrics and are NOT calibrated
+       probabilities.
+    2. 2D Sensor Disclaimer: Standard optical 2D camera feeds do NOT evaluate physiological
+       liveness or depth; they cannot guarantee prevention of 2D photo presentation attacks.
+    3. Conservative Verification: Uncertain predictions (distance near threshold or insufficient
+       majority votes across rolling frames) are rejected conservatively. Manual attendance
+       registration remains available at all times through the Attendance module.
     """
-    def __init__(self, track_id: int = 1, history_len: int = 6, strict_threshold: float = 68.0):
+    def __init__(self, track_id: int = 1, history_len: int = 6, strict_threshold: float = 78.0):
         self.track_id = track_id
         self.history_len = history_len
         self.strict_threshold = strict_threshold
@@ -267,7 +283,7 @@ class SpatialFaceTracker:
         required_votes = max(2, min(3, len(self.history)))
 
         if vote_count >= required_votes and avg_distance <= self.strict_threshold:
-            confidence_pct = max(10, min(99, int(100 - (avg_distance * 0.70))))
+            confidence_pct = max(10, min(99, int(100 - (avg_distance * 0.58))))
             name = student_info.get("name", f"Student #{best_id}") if student_info else f"Student #{best_id}"
             roll = student_info.get("roll", str(best_id)) if student_info else str(best_id)
             dep = student_info.get("dep", "General") if student_info else "General"
@@ -278,15 +294,15 @@ class SpatialFaceTracker:
             self.last_confirmed_dep = dep
             self.last_confirmed_conf = confidence_pct
 
-            return True, name, roll, dep, confidence_pct, f"{confidence_pct}% Match (Verified)"
+            return True, name, roll, dep, confidence_pct, f"Match Score: {confidence_pct}/100 (Dist: {avg_distance:.1f})"
 
         # Instant verification for very high confidence single matches (distance <= 50.0)
         if distance <= 50.0 and student_info:
-            confidence_pct = max(10, min(99, int(100 - (distance * 0.70))))
+            confidence_pct = max(10, min(99, int(100 - (distance * 0.58))))
             name = student_info.get("name", f"Student #{student_id}")
             roll = student_info.get("roll", str(student_id))
             dep = student_info.get("dep", "General")
-            return True, name, roll, dep, confidence_pct, f"{confidence_pct}% Match (Verified)"
+            return True, name, roll, dep, confidence_pct, f"Match Score: {confidence_pct}/100 (Dist: {distance:.1f})"
 
         return False, "Scanning...", "--", "--", 0, "Scanning Face..."
 
@@ -300,11 +316,12 @@ class MultiFaceTrackerManager:
     Manages spatial face tracks across frames using bounding box centroid association.
     Eliminates cross-contamination between different faces and background artifacts.
     """
-    def __init__(self, max_distance: float = 120.0, max_age_seconds: float = 0.8):
+    def __init__(self, max_distance: float = 120.0, max_age_seconds: float = 0.8, strict_threshold: float = 78.0):
         self.tracks = {}
         self.next_id = 1
         self.max_distance = max_distance
         self.max_age_seconds = max_age_seconds
+        self.strict_threshold = strict_threshold
 
     def match_boxes_to_trackers(self, detected_boxes: list) -> dict:
         now = time.time()
@@ -334,8 +351,9 @@ class MultiFaceTrackerManager:
             if best_track_id is not None:
                 used_tracks.add(best_track_id)
                 tracker = self.tracks[best_track_id]
+                tracker.strict_threshold = self.strict_threshold
             else:
-                tracker = SpatialFaceTracker(track_id=self.next_id, history_len=6, strict_threshold=68.0)
+                tracker = SpatialFaceTracker(track_id=self.next_id, history_len=6, strict_threshold=self.strict_threshold)
                 self.tracks[self.next_id] = tracker
                 self.next_id += 1
 
@@ -381,10 +399,16 @@ class FaceRecognitionWindow:
         self.camera_thread = None
         self.session_count = 0
         self.var_hd_boost = tk.StringVar(value="Enhanced HD (Default)")
+        self.var_sensitivity = tk.StringVar(value="Balanced (Default <= 78.0)")
         
         # Multi-face spatial tracking manager
-        self.tracker_manager = MultiFaceTrackerManager(max_distance=120.0, max_age_seconds=0.8)
-        self.face_tracker = SpatialFaceTracker(track_id=1, history_len=6, strict_threshold=68.0)
+        self.tracker_manager = MultiFaceTrackerManager(max_distance=120.0, max_age_seconds=0.8, strict_threshold=78.0)
+        self.face_tracker = SpatialFaceTracker(track_id=1, history_len=6, strict_threshold=78.0)
+
+        # Interactive Liveness Verification & Anti-Spoofing Session
+        self.liveness_session = LivenessChallengeSession(step_timeout=4.0, total_timeout=8.5)
+        self.liveness_cooldown_until = 0.0
+        self.liveness_lost_frames = 0
         
         self.root.protocol("WM_DELETE_WINDOW", self.handle_back_or_close)
         self.setup_ui()
@@ -574,8 +598,9 @@ class FaceRecognitionWindow:
         lbl_spec2 = tk.Label(spec_strip, text="⚡ Stabilizer: 7-Frame Voting", font=("Segoe UI", 8), fg="#cbd5e1", bg="#06152b")
         lbl_spec2.pack(side=tk.LEFT, padx=(0, 16))
 
-        lbl_spec3 = tk.Label(spec_strip, text="🎯 Threshold: Dist <= 72.0", font=("Segoe UI", 8), fg="#10b981", bg="#06152b")
+        lbl_spec3 = tk.Label(spec_strip, text="🎯 Threshold: Dist <= 78.0", font=("Segoe UI", 8), fg="#10b981", bg="#06152b")
         lbl_spec3.pack(side=tk.LEFT)
+        self.lbl_spec3 = lbl_spec3
 
         # -------------------------------------------------------------------------
         # RIGHT PANEL: Biometric Verification & Controls Hub Card
@@ -604,7 +629,7 @@ class FaceRecognitionWindow:
             fg="#ffffff",
             bg="#071a35"
         )
-        lbl_right_title.pack(anchor="w", pady=(0, 8))
+        lbl_right_title.pack(anchor="w", pady=(0, 6))
 
         # HD Clarity & Lighting Engine Control Strip
         clarity_box = tk.Frame(
@@ -615,12 +640,12 @@ class FaceRecognitionWindow:
             highlightbackground="#1e3a5f",
             highlightthickness=1,
             padx=12,
-            pady=8
+            pady=6
         )
-        clarity_box.pack(fill=tk.X, pady=(0, 10))
+        clarity_box.pack(fill=tk.X, pady=(0, 6))
 
         clarity_top = tk.Frame(clarity_box, bg="#06152b")
-        clarity_top.pack(fill=tk.X, pady=(0, 4))
+        clarity_top.pack(fill=tk.X, pady=(0, 2))
 
         lbl_clarity_icon = tk.Label(
             clarity_top,
@@ -644,6 +669,45 @@ class FaceRecognitionWindow:
             ]
         )
         combo_clarity.pack(fill=tk.X)
+
+        # Sensitivity / Matching Tolerance Control Strip
+        sens_box = tk.Frame(
+            right_inner,
+            bg="#06152b",
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground="#1e3a5f",
+            highlightthickness=1,
+            padx=12,
+            pady=6
+        )
+        sens_box.pack(fill=tk.X, pady=(0, 8))
+
+        sens_top = tk.Frame(sens_box, bg="#06152b")
+        sens_top.pack(fill=tk.X, pady=(0, 2))
+
+        lbl_sens_icon = tk.Label(
+            sens_top,
+            text="🎯 Biometric Sensitivity & Tolerance:",
+            font=("Segoe UI", 9, "bold"),
+            fg="#10b981",
+            bg="#06152b"
+        )
+        lbl_sens_icon.pack(side=tk.LEFT)
+
+        combo_sens = ttk.Combobox(
+            sens_box,
+            textvariable=self.var_sensitivity,
+            font=("Segoe UI", 9),
+            state="readonly",
+            values=[
+                "Balanced (Default <= 78.0)",
+                "High Strictness (<= 70.0)",
+                "High Sensitivity / Low-Light (<= 82.0)"
+            ]
+        )
+        combo_sens.pack(fill=tk.X)
+        combo_sens.bind("<<ComboboxSelected>>", self._on_sensitivity_change)
 
         # 1. Primary Action Button: "Start Face Scan ➔"
         self.btn_scan = tk.Button(
@@ -743,6 +807,16 @@ class FaceRecognitionWindow:
         )
         self.lbl_recog_time.pack(fill=tk.X, pady=2)
 
+        self.lbl_recog_email = tk.Label(
+            self.recog_card,
+            text="Parent Alert:   --",
+            font=("Segoe UI", 9),
+            fg="#94a3b8",
+            bg="#06152b",
+            anchor="w"
+        )
+        self.lbl_recog_email.pack(fill=tk.X, pady=2)
+
         self.lbl_recog_match = tk.Label(
             self.recog_card,
             text="Biometric Match: --",
@@ -752,6 +826,16 @@ class FaceRecognitionWindow:
             anchor="w"
         )
         self.lbl_recog_match.pack(fill=tk.X, pady=(4, 0))
+
+        self.lbl_liveness_status = tk.Label(
+            self.recog_card,
+            text="Liveness Status:  Ready / Idle",
+            font=("Segoe UI", 9, "bold"),
+            fg="#94a3b8",
+            bg="#06152b",
+            anchor="w"
+        )
+        self.lbl_liveness_status.pack(fill=tk.X, pady=(2, 0))
 
         # 4. Quick Action Navigation Buttons
         btn_container = tk.Frame(right_inner, bg="#071a35")
@@ -807,14 +891,14 @@ class FaceRecognitionWindow:
         )
         status_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(4, 8))
 
-        lbl_bot_status = tk.Label(
+        self.lbl_bot_status = tk.Label(
             status_bar,
-            text="● BIOMETRIC ENGINE: ONLINE  |  Anti-Flicker Temporal Voting  |  LBPH Strict Distance <= 72.0",
+            text="● BIOMETRIC ENGINE: ONLINE  |  Anti-Flicker Temporal Voting  |  LBPH Dist <= 78.0  |  2D Optical (Non-Liveness)",
             font=("Segoe UI", 8, "bold"),
             fg="#10b981",
             bg="#071a35"
         )
-        lbl_bot_status.pack(side=tk.LEFT, padx=16, pady=4)
+        self.lbl_bot_status.pack(side=tk.LEFT, padx=16, pady=4)
 
         lbl_bot_mentor = tk.Label(
             status_bar,
@@ -824,6 +908,29 @@ class FaceRecognitionWindow:
             bg="#071a35"
         )
         lbl_bot_mentor.pack(side=tk.RIGHT, padx=16, pady=4)
+
+    def _on_sensitivity_change(self, event=None):
+        """Dynamically adjusts the LBPH distance acceptance threshold in real time."""
+        val = self.var_sensitivity.get()
+        if "<= 70.0" in val:
+            thresh = 70.0
+        elif "<= 82.0" in val:
+            thresh = 82.0
+        else:
+            thresh = 78.0
+        
+        if hasattr(self, "tracker_manager"):
+            self.tracker_manager.strict_threshold = thresh
+            for trk in self.tracker_manager.tracks.values():
+                trk.strict_threshold = thresh
+        if hasattr(self, "face_tracker"):
+            self.face_tracker.strict_threshold = thresh
+        if hasattr(self, "lbl_spec3"):
+            self.lbl_spec3.config(text=f"🎯 Threshold: Dist <= {thresh:.1f}")
+        if hasattr(self, "lbl_bot_status"):
+            self.lbl_bot_status.config(
+                text=f"● BIOMETRIC ENGINE: ONLINE  |  Anti-Flicker Temporal Voting  |  LBPH Strict Distance <= {thresh:.1f}"
+            )
 
     def open_attendance_window(self):
         """Opens Attendance Records window."""
@@ -850,6 +957,68 @@ class FaceRecognitionWindow:
                 self.lbl_recog_match.config(text="Biometric Match: Verified ✓", fg="#10b981")
         except Exception:
             pass
+
+    def _update_email_ui_status(self, text: str, fg: str = "#10b981"):
+        """Updates the parent email delivery badge on the recognized card."""
+        try:
+            if hasattr(self, "lbl_recog_email") and self.lbl_recog_email.winfo_exists():
+                self.lbl_recog_email.config(text=text, fg=fg)
+        except Exception:
+            pass
+
+    def _update_liveness_ui_status(self, text: str, fg: str = "#10b981"):
+        """Updates the active liveness status badge on the recognized student card."""
+        try:
+            if hasattr(self, "lbl_liveness_status") and self.lbl_liveness_status.winfo_exists():
+                self.lbl_liveness_status.config(text=text, fg=fg)
+        except Exception:
+            pass
+
+    def _draw_liveness_hud(self, frame: np.ndarray, hud_info: dict, w_f: int, h_f: int):
+        """
+        Renders an anti-spoofing liveness verification guidance banner across the camera viewport.
+        """
+        state = hud_info.get("state")
+        if state == "IDLE":
+            return
+
+        banner_h = 52
+        by1 = 36
+        by2 = by1 + banner_h
+
+        # Semi-transparent dark overlay for high contrast
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (12, by1), (w_f - 12, by2), (8, 20, 36), -1)
+        alpha = 0.82
+        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+
+        border_color = hud_info.get("color", (0, 220, 255))
+        cv2.rectangle(frame, (12, by1), (w_f - 12, by2), border_color, 1)
+
+        # Title & Step Badge
+        title = hud_info.get("title", "LIVENESS CHALLENGE")
+        step_str = hud_info.get("step_str", "")
+        instr = hud_info.get("instruction", "")
+        rem_sec = hud_info.get("remaining_seconds", 0.0)
+
+        # Left: Title
+        cv2.putText(frame, title, (24, by1 + 22), cv2.FONT_HERSHEY_DUPLEX, 0.50, border_color, 1, cv2.LINE_AA)
+
+        # Right: Step & Timer
+        if rem_sec > 0:
+            timer_str = f"{step_str} | {rem_sec:.1f}s"
+            cv2.putText(frame, timer_str, (w_f - 165, by1 + 22), cv2.FONT_HERSHEY_DUPLEX, 0.44, (220, 230, 240), 1, cv2.LINE_AA)
+        else:
+            cv2.putText(frame, step_str, (w_f - 120, by1 + 22), cv2.FONT_HERSHEY_DUPLEX, 0.44, (220, 230, 240), 1, cv2.LINE_AA)
+
+        # Bottom: Instruction subtitle
+        cv2.putText(frame, instr, (24, by1 + 42), cv2.FONT_HERSHEY_DUPLEX, 0.40, (200, 215, 230), 1, cv2.LINE_AA)
+
+        # Progress bar along bottom of banner
+        ratio = hud_info.get("progress_ratio", 0.0)
+        bar_w = int((w_f - 24) * ratio)
+        if bar_w > 0:
+            cv2.line(frame, (12, by2 - 1), (12 + bar_w, by2 - 1), border_color, 2)
 
     def _enhance_frame_clarity(self, frame, mode="Enhanced HD (Default)"):
         """
@@ -883,6 +1052,8 @@ class FaceRecognitionWindow:
         if not self.is_camera_running:
             return
         try:
+            if not hasattr(self, "root") or not self.root.winfo_exists() or not self.lbl_video_feed.winfo_exists():
+                return
             # Measure viewport container size dynamically
             v_w = self.viewport_frame.winfo_width()
             v_h = self.viewport_frame.winfo_height()
@@ -1029,7 +1200,15 @@ class FaceRecognitionWindow:
         current_fps = 60.0
         
         # Spatial multi-face tracking manager
-        tracker_manager = MultiFaceTrackerManager(max_distance=120.0, max_age_seconds=0.8)
+        val = self.var_sensitivity.get()
+        if "<= 70.0" in val:
+            init_thresh = 70.0
+        elif "<= 82.0" in val:
+            init_thresh = 82.0
+        else:
+            init_thresh = 78.0
+        tracker_manager = MultiFaceTrackerManager(max_distance=120.0, max_age_seconds=0.8, strict_threshold=init_thresh)
+        self.tracker_manager = tracker_manager
 
         # Cache student info to prevent redundant SQL queries per frame
         student_cache = {}
@@ -1041,7 +1220,7 @@ class FaceRecognitionWindow:
                 time.sleep(0.01)
                 continue
 
-            # Real-Time HD Clarity & Adaptive Lighting Enhancement
+            # Real-Time HD Clarity & Adaptive Lighting Enhancement for Visual UI display
             frame = self._enhance_frame_clarity(raw_frame, mode=self.var_hd_boost.get())
 
             frame_counter += 1
@@ -1051,7 +1230,8 @@ class FaceRecognitionWindow:
                 last_fps_time = time.time()
 
             h_f, w_f = frame.shape[:2]
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            # Machine Learning & detection run on pure uncorrupted raw grayscale to match training distribution
+            gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
 
             # Fast, Robust 1-Pass Face Detection on 0.5x Downsampled Frame
             small_gray = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5, interpolation=cv2.INTER_LINEAR)
@@ -1119,7 +1299,10 @@ class FaceRecognitionWindow:
                 if is_verified:
                     if conf_pct > max_conf:
                         max_conf = conf_pct
-                        best_verified_face = (student_id, disp_name, disp_roll, disp_dep, conf_pct, status_str)
+                        best_verified_face = (
+                            student_id, disp_name, disp_roll, disp_dep, conf_pct, status_str,
+                            face_tracker.track_id, (x, y, w, h), face_equalized, s_info
+                        )
 
                     # 1. Render Neon Green HUD Bounding Box
                     box_color = (0, 255, 120)
@@ -1160,7 +1343,7 @@ class FaceRecognitionWindow:
                     if len(label_title) > 26:
                         label_title = label_title[:24] + ".."
                     cv2.putText(frame, label_title, (bx1 + 6, ty1), cv2.FONT_HERSHEY_DUPLEX, 0.46, (255, 255, 255), 1, cv2.LINE_AA)
-                    cv2.putText(frame, f"Match: {conf_pct}% (Verified)", (bx1 + 6, ty2), cv2.FONT_HERSHEY_DUPLEX, 0.40, (0, 255, 120), 1, cv2.LINE_AA)
+                    cv2.putText(frame, f"Match Score: {conf_pct}/100", (bx1 + 6, ty2), cv2.FONT_HERSHEY_DUPLEX, 0.40, (0, 255, 120), 1, cv2.LINE_AA)
 
                 else:
                     # Unknown Face / Scanning (Red HUD)
@@ -1184,22 +1367,160 @@ class FaceRecognitionWindow:
                     cv2.rectangle(frame, (bx1, by1), (bx2, by2), box_color, 1)
                     cv2.putText(frame, "Unknown Face", (bx1 + 6, ty), cv2.FONT_HERSHEY_DUPLEX, 0.44, (0, 80, 255), 1, cv2.LINE_AA)
 
-            # Update Attendance & UI Telemetry for highest confidence verified face
-            if best_verified_face is not None:
-                b_sid, b_name, b_roll, b_dep, b_conf, b_status = best_verified_face
-                now = datetime.now()
-                time_str = now.strftime("%I:%M:%S %p")
-                date_str = now.strftime("%d/%m/%Y")
+            # Update Attendance, Liveness Challenge & UI Telemetry
+            curr_time = time.time()
+            now_dt = datetime.now()
+            time_str = now_dt.strftime("%I:%M:%S %p")
+            date_str = now_dt.strftime("%d/%m/%Y")
 
-                if b_sid not in self.logged_session_students:
-                    try:
-                        log_attendance(b_sid, b_roll, b_name, b_dep, time_str, date_str, "Present")
-                        log_attendance_to_csv(b_sid, b_roll, b_name, b_dep, time_str, date_str, "Present")
-                        self.logged_session_students.add(b_sid)
-                    except Exception:
-                        pass
+            if self.liveness_session.is_active():
+                # Active Liveness Verification in Progress: Track challenge subject
+                target_track_id = self.liveness_session.track_id
+                active_match = None
 
-                self.root.after(0, lambda n=b_name, r=b_roll, t=time_str, d=b_dep, c=b_status: self._update_live_ui_log(n, r, t, d, c))
+                # Locate the specific tracked face in current frame
+                for idx, (x, y, w, h) in enumerate(faces):
+                    ft = tracker_map.get(idx)
+                    if ft and ft.track_id == target_track_id:
+                        f_raw = gray[y:y+h, x:x+w]
+                        if f_raw.size > 0:
+                            f_res = cv2.resize(f_raw, (200, 200), interpolation=cv2.INTER_LANCZOS4)
+                            f_eq = cv2.equalizeHist(f_res)
+                            active_match = (ft, (x, y, w, h), f_eq)
+                        break
+
+                if active_match is not None:
+                    ft, bbox, f_crop = active_match
+                    self.liveness_lost_frames = 0
+                    is_liveness_passed, liveness_msg = self.liveness_session.update(
+                        face_gray=f_crop,
+                        bbox=bbox,
+                        current_track_id=ft.track_id,
+                        frame_w=w_f,
+                        frame_h=h_f,
+                        now=curr_time
+                    )
+
+                    if is_liveness_passed:
+                        # BOTH Liveness Check and LBPH Identity Match have passed!
+                        b_sid = self.liveness_session.student_id
+                        b_name = self.liveness_session.student_name
+                        s_info = get_student_by_id(b_sid)
+                        b_roll = s_info.get("roll", "--") if s_info else "--"
+                        b_dep = s_info.get("dep", "--") if s_info else "--"
+
+                        try:
+                            db_ok, db_msg = log_attendance(b_sid, b_roll, b_name, b_dep, time_str, date_str, "Present")
+                            if db_ok:
+                                # Write to CSV only after SQLite transaction succeeds
+                                log_attendance_to_csv(b_sid, b_roll, b_name, b_dep, time_str, date_str, "Present")
+                                self.logged_session_students.add(b_sid)
+
+                                # Automated Parent Email Notification (Asynchronous / Non-blocking)
+                                try:
+                                    p_email = (s_info.get("parent_email", "") if s_info else "").strip()
+                                    if p_email:
+                                        self.root.after(0, lambda: self._update_email_ui_status("Parent Alert:  Dispatching...", "#38bdf8"))
+
+                                        def _log_notify_result(ok, msg, to_p=p_email, sn=b_name):
+                                            short_to = to_p if len(to_p) <= 24 else to_p[:21] + "..."
+                                            if ok:
+                                                print(f"[FaceRecognition] Parent notification delivered for {sn} to {to_p}: {msg}")
+                                                status_text = f"Parent Alert:  Delivered to {short_to}"
+                                                fg_color = "#10b981"
+                                            elif "duplicate" in msg.lower() or "already" in msg.lower():
+                                                print(f"[FaceRecognition] Parent notification notice for {sn} to {to_p}: {msg}")
+                                                status_text = f"Parent Alert:  Already sent today"
+                                                fg_color = "#38bdf8"
+                                            else:
+                                                print(f"[FaceRecognition] Parent notification notice for {sn} to {to_p}: {msg}")
+                                                status_text = f"Parent Alert:  {msg[:28]}"
+                                                fg_color = "#f59e0b"
+                                            try:
+                                                self.root.after(0, lambda: self._update_email_ui_status(status_text, fg_color))
+                                            except Exception:
+                                                pass
+
+                                        send_attendance_email_async(
+                                            student_id=b_sid,
+                                            student_name=b_name,
+                                            roll=b_roll,
+                                            department=b_dep,
+                                            date_str=date_str,
+                                            time_str=time_str,
+                                            status="Present",
+                                            parent_email=p_email,
+                                            callback=_log_notify_result
+                                        )
+                                    else:
+                                        self.root.after(0, lambda: self._update_email_ui_status("Parent Alert:  No email registered", "#94a3b8"))
+                                except Exception as em_err:
+                                    print(f"[FaceRecognition] Parent email dispatch notice: {em_err}")
+
+                                self.root.after(0, lambda n=b_name, r=b_roll, t=time_str, d=b_dep: self._update_live_ui_log(n, r, t, d, "Verified Liveness (Pass)"))
+                                self.root.after(0, lambda: self._update_liveness_ui_status("Liveness Status:  ● Verified (Pass)", "#10b981"))
+                            else:
+                                # Database rejected (already logged today or integrity constraint)
+                                self.logged_session_students.add(b_sid)
+                                self.root.after(0, lambda: self._update_liveness_ui_status("Liveness Status:  Already Marked Today", "#38bdf8"))
+                        except Exception as ex:
+                            print(f"[FaceRecognition] Attendance recording error: {ex}")
+
+                    elif self.liveness_session.is_failed():
+                        # Fail closed!
+                        self.liveness_cooldown_until = curr_time + 1.0
+                        fail_reason = self.liveness_session.error_reason or "Challenge Failed"
+                        self.root.after(0, lambda r=fail_reason: self._update_liveness_ui_status(f"Liveness Status:  ⚠ {r}", "#ef4444"))
+                        self.root.after(0, lambda: self.lbl_live_log.config(
+                            text="⚠ Liveness check failed / timed out. Please retry, or use Attendance module for manual review.",
+                            fg="#f59e0b"
+                        ))
+                    else:
+                        # In progress
+                        self.root.after(0, lambda m=liveness_msg: self._update_liveness_ui_status(f"Liveness Status:  {m}", "#00e5ff"))
+                else:
+                    # Tolerant tracking continuity: Allow up to 18 frames grace (~0.6-0.8s) during motion/angle turns
+                    self.liveness_lost_frames += 1
+                    if self.liveness_lost_frames > 18:
+                        self.liveness_session.abort("Face lost or left camera frame")
+                        self.liveness_cooldown_until = curr_time + 1.0
+                        self.root.after(0, lambda: self._update_liveness_ui_status("Liveness Status:  ⚠ Face Lost", "#ef4444"))
+                    else:
+                        self.root.after(0, lambda: self._update_liveness_ui_status("Liveness Status:  ● Tracking face...", "#38bdf8"))
+
+            else:
+                # No active challenge session: check if a verified face is present to initiate challenge
+                if best_verified_face is not None:
+                    (b_sid, b_name, b_roll, b_dep, b_conf, b_status,
+                     b_track_id, b_bbox, b_face_crop, b_sinfo) = best_verified_face
+
+                    # Check if already logged today in session or database
+                    if b_sid not in self.logged_session_students:
+                        if is_student_marked_today(b_sid, date_str):
+                            self.logged_session_students.add(b_sid)
+
+                    if b_sid in self.logged_session_students:
+                        # Already marked today: update telemetry without re-prompting challenge
+                        self.root.after(0, lambda: self._update_liveness_ui_status("Liveness Status:  Already Marked Today", "#38bdf8"))
+                        self.root.after(0, lambda n=b_name, r=b_roll, t=time_str, d=b_dep: self._update_live_ui_log(n, r, t, d, "Present (Already Marked)"))
+                    else:
+                        if curr_time < self.liveness_cooldown_until:
+                            rem_cd = max(0.0, self.liveness_cooldown_until - curr_time)
+                            self.root.after(0, lambda r=rem_cd: self._update_liveness_ui_status(f"Liveness Status:  Cooldown ({r:.1f}s)...", "#f59e0b"))
+                        else:
+                            # Start fresh randomized challenge for this tracked face
+                            self.liveness_session.start(
+                                track_id=b_track_id,
+                                student_id=b_sid,
+                                student_name=b_name
+                            )
+                            self.liveness_lost_frames = 0
+                            self.root.after(0, lambda: self._update_liveness_ui_status("Liveness Status:  ● Challenge Active", "#00e5ff"))
+
+            # Render Active Liveness Challenge HUD Overlay
+            if hasattr(self, "liveness_session") and self.liveness_session.state != self.liveness_session.STATE_IDLE:
+                self._draw_liveness_hud(frame, self.liveness_session.get_hud_details(), w_f, h_f)
+
             cv2.rectangle(frame, (0, 0), (w_f, 32), (6, 18, 32), -1)
             cv2.line(frame, (0, 32), (w_f, 32), (0, 132, 255), 2)
             cv2.putText(frame, "FACEATTEND BIOMETRIC SCANNER", (14, 21), cv2.FONT_HERSHEY_DUPLEX, 0.46, (0, 210, 255), 1, cv2.LINE_AA)
@@ -1225,13 +1546,22 @@ class FaceRecognitionWindow:
         self.root.after(0, lambda: (self.lbl_video_feed.pack_forget(), self.placeholder_frame.pack(fill=tk.BOTH, expand=True)))
 
     def handle_back_or_close(self):
-        """Cleanly terminates camera loop and destroys window."""
+        """Cleanly terminates camera loop, joins background thread, releases resources, and destroys window."""
         self.is_camera_running = False
+        if hasattr(self, "camera_thread") and self.camera_thread and self.camera_thread.is_alive():
+            try:
+                self.camera_thread.join(timeout=0.6)
+            except Exception:
+                pass
         try:
             cv2.destroyAllWindows()
         except Exception:
             pass
-        self.root.destroy()
+        try:
+            if self.root.winfo_exists():
+                self.root.destroy()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

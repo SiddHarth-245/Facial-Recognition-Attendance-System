@@ -32,7 +32,18 @@ High-Concurrency Engine Settings & Anti-Lock Architecture:
 
 import os
 import sqlite3
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
+
+# Cryptographic and authentication security utilities
+from utils.security import (
+    hash_password,
+    verify_password,
+    hash_security_answer,
+    verify_security_answer,
+    is_password_hashed,
+    is_security_answer_hashed,
+    is_hashed
+)
 
 # Resolve absolute path to database directory and SQLite storage file
 DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "database")
@@ -66,17 +77,89 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def migrate_user_credentials(conn: sqlite3.Connection):
+    """
+    Safely migrates existing administrative accounts from plaintext to PBKDF2-HMAC-SHA256.
+    Ensures zero silent lockouts: users can continue using existing passwords and security answers.
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, email, password, security_a FROM users")
+    users = cursor.fetchall()
+    for uid, email, pwd, sec_a in users:
+        updates = []
+        params = []
+        if pwd and not is_password_hashed(pwd):
+            updates.append("password = ?")
+            params.append(hash_password(pwd))
+        if sec_a and not is_security_answer_hashed(sec_a):
+            updates.append("security_a = ?")
+            params.append(hash_security_answer(sec_a))
+        if updates:
+            params.append(uid)
+            cursor.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", tuple(params))
+    conn.commit()
+
+
+def deduplicate_existing_records(conn: sqlite3.Connection):
+    """
+    Safely resolves legacy duplicate records prior to unique constraint enforcement.
+    Retains the latest validated records and removes redundant attempts.
+    """
+    cursor = conn.cursor()
+    
+    # 1. Deduplicate attendance table
+    cursor.execute("""
+        SELECT student_id, date, COUNT(*) as cnt 
+        FROM attendance 
+        GROUP BY student_id, date 
+        HAVING cnt > 1
+    """)
+    att_dupes = cursor.fetchall()
+    for sid, dt, count in att_dupes:
+        cursor.execute("""
+            SELECT attendance_id FROM attendance 
+            WHERE student_id = ? AND date = ? 
+            ORDER BY attendance_id DESC
+        """, (sid, dt))
+        ids = [r[0] for r in cursor.fetchall()]
+        keep_id = ids[0]
+        del_ids = ids[1:]
+        cursor.execute(f"DELETE FROM attendance WHERE attendance_id IN ({','.join(['?']*len(del_ids))})", del_ids)
+
+    # 2. Deduplicate email_notifications table
+    cursor.execute("""
+        SELECT student_id, attendance_date, status, COUNT(*) as cnt 
+        FROM email_notifications 
+        GROUP BY student_id, attendance_date, status 
+        HAVING cnt > 1
+    """)
+    notif_dupes = cursor.fetchall()
+    for sid, dt, st, count in notif_dupes:
+        cursor.execute("""
+            SELECT id, delivery_result FROM email_notifications 
+            WHERE student_id = ? AND attendance_date = ? AND status = ? 
+            ORDER BY id DESC
+        """, (sid, dt, st))
+        rows = cursor.fetchall()
+        accepted_ids = [r[0] for r in rows if r[1] == 'ACCEPTED']
+        keep_id = accepted_ids[0] if accepted_ids else rows[0][0]
+        del_ids = [r[0] for r in rows if r[0] != keep_id]
+        if del_ids:
+            cursor.execute(f"DELETE FROM email_notifications WHERE id IN ({','.join(['?']*len(del_ids))})", del_ids)
+
+
 def initialize_database():
     """
-    Initializes the relational database schema, creating tables and indexes
-    if they do not already exist, and pre-seeds the default administrator account.
+    Initializes the relational database schema, creates tables and unique integrity indexes,
+    executes safe credential migrations, and guarantees thread-safe WAL operation without
+    hardcoding any administrative credentials.
     """
     conn = get_connection()
     try:
         cursor = conn.cursor()
         
         # ---------------------------------------------------------------------
-        # 1. Users Table (Administrative Accounts & Security Challenges)
+        # 1. Users Table (Administrative Accounts & Cryptographic Credentials)
         # ---------------------------------------------------------------------
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -111,12 +194,19 @@ def initialize_database():
                 phone TEXT NOT NULL,
                 address TEXT NOT NULL,
                 teacher TEXT NOT NULL,
-                photo_sample TEXT DEFAULT 'No'
+                photo_sample TEXT DEFAULT 'No',
+                parent_email TEXT DEFAULT ''
             );
         """)
         
+        # Schema migration: verify parent_email column exists if table previously created
+        cursor.execute("PRAGMA table_info(students)")
+        student_columns = [col[1] for col in cursor.fetchall()]
+        if "parent_email" not in student_columns:
+            cursor.execute("ALTER TABLE students ADD COLUMN parent_email TEXT DEFAULT '';")
+        
         # ---------------------------------------------------------------------
-        # 3. Attendance Records Table (Biometric Verification Logs)
+        # 3. Attendance Records Table (Biometric Verification Logs & Integrity Index)
         # ---------------------------------------------------------------------
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS attendance (
@@ -131,14 +221,41 @@ def initialize_database():
             );
         """)
         
-        # Pre-seed default administrator credentials (if not already existing)
+        # ---------------------------------------------------------------------
+        # 4. Email Notifications Tracking Table (Duplicate Prevention & Audit)
+        # ---------------------------------------------------------------------
         cursor.execute("""
-            INSERT OR IGNORE INTO users (fname, lname, contact, email, security_q, security_a, password)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            "Vedprakash", "Pandey", "9876543210", "23053645@kiit.ac.in",
-            "Your Birth Place", "City", "admin123"
-        ))
+            CREATE TABLE IF NOT EXISTS email_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id TEXT NOT NULL,
+                roll TEXT NOT NULL,
+                attendance_date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                recipient_email TEXT NOT NULL,
+                delivery_result TEXT NOT NULL,
+                provider_message_id TEXT DEFAULT '',
+                error_details TEXT DEFAULT '',
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        
+        # Deduplicate existing records before applying unique constraints
+        deduplicate_existing_records(conn)
+
+        # Enforce unique indexes for attendance and notification integrity
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_student_date 
+            ON attendance(student_id, date);
+        """)
+        
+        cursor.execute("DROP INDEX IF EXISTS idx_email_notif_student_date_status;")
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_email_notif_student_date_status_unique 
+            ON email_notifications(student_id, attendance_date, status);
+        """)
+        
+        # Migrate any remaining unhashed credentials safely to PBKDF2
+        migrate_user_credentials(conn)
         
         conn.commit()
     finally:
@@ -149,10 +266,34 @@ def initialize_database():
 # User Authentication & Credential Recovery Helpers
 # =============================================================================
 
+def get_user_count() -> int:
+    """
+    Returns the total number of registered administrative user accounts in SQLite.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        row = cursor.fetchone()
+        return row[0] if row else 0
+    except Exception:
+        return 0
+    finally:
+        conn.close()
+
+
+def is_first_run() -> bool:
+    """
+    Returns True if no administrative accounts exist, indicating first-run setup is required.
+    """
+    return get_user_count() == 0
+
+
 def register_user(fname: str, lname: str, contact: str, email: str, 
                   security_q: str, security_a: str, password: str) -> Tuple[bool, str]:
     """
-    Registers a new administrative user with transactional safety.
+    Registers a new administrative user with PBKDF2-HMAC-SHA256 salted password
+    and normalized security answer hashing for maximum credential defense.
 
     Parameters:
     -----------
@@ -171,6 +312,9 @@ def register_user(fname: str, lname: str, contact: str, email: str,
     conn = get_connection()
     try:
         cursor = conn.cursor()
+        hashed_pwd = hash_password(password)
+        hashed_sec_a = hash_security_answer(security_a)
+
         cursor.execute("""
             INSERT INTO users (fname, lname, contact, email, security_q, security_a, password)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -180,8 +324,8 @@ def register_user(fname: str, lname: str, contact: str, email: str,
             contact.strip(), 
             email.lower().strip(), 
             security_q, 
-            security_a.strip().lower(), 
-            password
+            hashed_sec_a, 
+            hashed_pwd
         ))
         conn.commit()
         return True, "User registered successfully!"
@@ -196,7 +340,8 @@ def register_user(fname: str, lname: str, contact: str, email: str,
 def verify_login(user_identifier: str, password: str) -> Tuple[bool, Optional[Dict[str, Any]], str]:
     """
     Authenticates a user against Email, First Name, Last Name, or Full Name.
-    Strictly enforces that ONLY registered users in the database can access the system.
+    Uses PBKDF2 salted hash comparison with constant-time verification.
+    If a legacy plaintext account is encountered, upgrades it in-place seamlessly.
 
     Parameters:
     -----------
@@ -234,11 +379,19 @@ def verify_login(user_identifier: str, password: str) -> Tuple[bool, Optional[Di
         if not row:
             return False, None, "Access Denied: This account is not registered. Only registered users are authorized to access the system. Please click 'Create Account' to register."
         
-        # Verify password for the registered user
+        # Verify password for the registered user using PBKDF2 constant-time check
         db_password = row[7]
-        if db_password != password:
+        if not verify_password(password, db_password):
             return False, None, "Access Denied: Incorrect password for this registered account. Please check your password or reset it via 'Forgot Password?'."
         
+        # Auto-upgrade legacy plaintext password if encountered
+        if not is_password_hashed(db_password):
+            try:
+                cursor.execute("UPDATE users SET password = ? WHERE id = ?", (hash_password(password), row[0]))
+                conn.commit()
+            except Exception:
+                pass
+
         user_data = {
             "id": row[0],
             "fname": row[1],
@@ -258,6 +411,8 @@ def verify_login(user_identifier: str, password: str) -> Tuple[bool, Optional[Di
 def reset_password(security_q: str, security_a: str, new_password: str, email: Optional[str] = None) -> Tuple[bool, str]:
     """
     Resets user password if security question and case-insensitive answer match.
+    Verifies against hashed or legacy plaintext security answers.
+    Persists the new password as a secure PBKDF2 hash.
 
     Parameters:
     -----------
@@ -280,23 +435,36 @@ def reset_password(security_q: str, security_a: str, new_password: str, email: O
         cursor = conn.cursor()
         if email and email.strip():
             cursor.execute("""
-                SELECT id FROM users 
-                WHERE (email = ? OR fname = ?) AND security_q = ? AND LOWER(security_a) = ?
+                SELECT id, security_a FROM users 
+                WHERE (LOWER(email) = ? OR LOWER(fname) = ?) AND security_q = ?
                 ORDER BY id DESC
-            """, (email.strip().lower(), email.strip(), security_q, security_a.strip().lower()))
+            """, (email.strip().lower(), email.strip().lower(), security_q))
         else:
             cursor.execute("""
-                SELECT id FROM users 
-                WHERE security_q = ? AND LOWER(security_a) = ?
+                SELECT id, security_a FROM users 
+                WHERE security_q = ?
                 ORDER BY id DESC
-            """, (security_q, security_a.strip().lower()))
+            """, (security_q,))
         
-        row = cursor.fetchone()
-        if not row:
+        candidates = cursor.fetchall()
+        matched_user_id = None
+        needs_sec_a_upgrade = False
+
+        for uid, stored_sec_a in candidates:
+            if verify_security_answer(security_a, stored_sec_a):
+                matched_user_id = uid
+                needs_sec_a_upgrade = not is_security_answer_hashed(stored_sec_a)
+                break
+
+        if not matched_user_id:
             return False, "Security Question or Answer did not match any record."
         
-        user_id = row[0]
-        cursor.execute("UPDATE users SET password = ? WHERE id = ?", (new_password, user_id))
+        new_hashed_pwd = hash_password(new_password)
+        if needs_sec_a_upgrade:
+            cursor.execute("UPDATE users SET password = ?, security_a = ? WHERE id = ?", 
+                           (new_hashed_pwd, hash_security_answer(security_a), matched_user_id))
+        else:
+            cursor.execute("UPDATE users SET password = ? WHERE id = ?", (new_hashed_pwd, matched_user_id))
         conn.commit()
         return True, "Password has been reset successfully!"
     except Exception as e:
@@ -329,8 +497,8 @@ def add_student(data: Dict[str, Any]) -> Tuple[bool, str]:
         cursor.execute("""
             INSERT INTO students (
                 student_id, dep, course, year, semester, name, division, 
-                roll, gender, dob, email, phone, address, teacher, photo_sample
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                roll, gender, dob, email, phone, address, teacher, photo_sample, parent_email
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             data["student_id"].strip(),
             data["dep"],
@@ -346,7 +514,8 @@ def add_student(data: Dict[str, Any]) -> Tuple[bool, str]:
             data["phone"].strip(),
             data["address"].strip(),
             data["teacher"].strip(),
-            data.get("photo_sample", "No")
+            data.get("photo_sample", "No"),
+            data.get("parent_email", "").strip()
         ))
         conn.commit()
         return True, "Student added successfully!"
@@ -379,7 +548,7 @@ def update_student(data: Dict[str, Any]) -> Tuple[bool, str]:
             UPDATE students SET
                 dep = ?, course = ?, year = ?, semester = ?, name = ?,
                 division = ?, roll = ?, gender = ?, dob = ?, email = ?,
-                phone = ?, address = ?, teacher = ?, photo_sample = ?
+                phone = ?, address = ?, teacher = ?, photo_sample = ?, parent_email = ?
             WHERE student_id = ?
         """, (
             data["dep"],
@@ -396,6 +565,7 @@ def update_student(data: Dict[str, Any]) -> Tuple[bool, str]:
             data["address"].strip(),
             data["teacher"].strip(),
             data.get("photo_sample", "No"),
+            data.get("parent_email", "").strip(),
             data["student_id"].strip()
         ))
         if cursor.rowcount == 0:
@@ -408,9 +578,48 @@ def update_student(data: Dict[str, Any]) -> Tuple[bool, str]:
         conn.close()
 
 
+def clean_student_biometrics(student_id: str) -> int:
+    """
+    Permanently purges photographic facial training samples associated with a student.
+    Enforces privacy and biometric sample retention safeguards.
+    """
+    import glob
+    sid = str(student_id).strip()
+    data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+    patterns = [
+        os.path.join(data_dir, f"user.{sid}.*.jpg"),
+        os.path.join(data_dir, f"user.{sid}.*.png")
+    ]
+    removed_count = 0
+    for p in patterns:
+        for f in glob.glob(p):
+            try:
+                os.remove(f)
+                removed_count += 1
+            except Exception:
+                pass
+    return removed_count
+
+
+def get_enrolled_student_ids() -> Set[str]:
+    """
+    Fetches the set of active student IDs currently registered in SQLite.
+    Used by the training pipeline to ensure only valid enrolled student samples
+    are compiled into biometric recognizer models.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT student_id FROM students")
+        return {str(r[0]).strip() for r in cursor.fetchall()}
+    finally:
+        conn.close()
+
+
 def delete_student(student_id: str) -> Tuple[bool, str]:
     """
-    Deletes a student record by ID.
+    Deletes a student record by ID and purges associated facial biometric training samples.
+    Rebuilds or invalidates the facial recognition classifier model to maintain biometric integrity.
 
     Parameters:
     -----------
@@ -429,11 +638,23 @@ def delete_student(student_id: str) -> Tuple[bool, str]:
         if cursor.rowcount == 0:
             return False, f"Student ID '{student_id}' not found."
         conn.commit()
-        return True, "Student deleted successfully!"
     except Exception as e:
         return False, f"Error deleting student: {str(e)}"
     finally:
         conn.close()
+
+    # Purge biometric samples associated with the deleted student
+    removed_samples = clean_student_biometrics(student_id)
+
+    # Re-train or invalidate classifier model if biometric samples were removed
+    if removed_samples > 0:
+        try:
+            from modules.train import train_classifier_core
+            train_classifier_core()
+        except Exception:
+            pass
+
+    return True, f"Student deleted successfully ({removed_samples} biometric samples purged)."
 
 
 def fetch_all_students() -> List[Tuple]:
@@ -450,7 +671,7 @@ def fetch_all_students() -> List[Tuple]:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT dep, course, year, semester, student_id, name, division,
-                   roll, gender, dob, email, phone, address, teacher, photo_sample
+                   roll, gender, dob, email, phone, address, teacher, photo_sample, parent_email
             FROM students ORDER BY student_id ASC
         """)
         return cursor.fetchall()
@@ -465,7 +686,7 @@ def search_students(search_by: str, query: str) -> List[Tuple]:
     Parameters:
     -----------
     search_by : str
-        Selected search criteria ("Student ID", "Roll No", "Phone No", "Student Name", "Department").
+        Selected search criteria ("Student ID", "Roll No", "Phone No", "Student Name", "Department", "Parent Email").
     query : str
         Substring to search for.
 
@@ -479,7 +700,8 @@ def search_students(search_by: str, query: str) -> List[Tuple]:
         "Roll No": "roll",
         "Phone No": "phone",
         "Student Name": "name",
-        "Department": "dep"
+        "Department": "dep",
+        "Parent Email": "parent_email"
     }
     field = field_map.get(search_by, "student_id")
     conn = get_connection()
@@ -487,7 +709,7 @@ def search_students(search_by: str, query: str) -> List[Tuple]:
         cursor = conn.cursor()
         cursor.execute(f"""
             SELECT dep, course, year, semester, student_id, name, division,
-                   roll, gender, dob, email, phone, address, teacher, photo_sample
+                   roll, gender, dob, email, phone, address, teacher, photo_sample, parent_email
             FROM students WHERE {field} LIKE ? ORDER BY student_id ASC
         """, (f"%{query.strip()}%",))
         return cursor.fetchall()
@@ -519,7 +741,40 @@ def get_student_by_id(student_id: str) -> Optional[Dict[str, Any]]:
                 "student_id": row[0], "dep": row[1], "course": row[2], "year": row[3],
                 "semester": row[4], "name": row[5], "division": row[6], "roll": row[7],
                 "gender": row[8], "dob": row[9], "email": row[10], "phone": row[11],
-                "address": row[12], "teacher": row[13], "photo_sample": row[14]
+                "address": row[12], "teacher": row[13], "photo_sample": row[14],
+                "parent_email": row[15] if len(row) > 15 and row[15] is not None else ""
+            }
+        return None
+    finally:
+        conn.close()
+
+
+def get_student_by_roll(roll: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetches the complete profile dictionary of a student matching their roll number.
+
+    Parameters:
+    -----------
+    roll : str
+        Target student roll number.
+
+    Returns:
+    --------
+    Optional[Dict[str, Any]]
+        Dictionary of student fields, or None if no record found.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM students WHERE roll = ? ORDER BY student_id DESC", (str(roll).strip(),))
+        row = cursor.fetchone()
+        if row:
+            return {
+                "student_id": row[0], "dep": row[1], "course": row[2], "year": row[3],
+                "semester": row[4], "name": row[5], "division": row[6], "roll": row[7],
+                "gender": row[8], "dob": row[9], "email": row[10], "phone": row[11],
+                "address": row[12], "teacher": row[13], "photo_sample": row[14],
+                "parent_email": row[15] if len(row) > 15 and row[15] is not None else ""
             }
         return None
     finally:
@@ -562,6 +817,7 @@ def log_attendance(student_id: str, roll: str, name: str, department: str,
                    time_str: str, date_str: str, status: str = "Present") -> Tuple[bool, str]:
     """
     Logs a new biometric attendance verification record with daily deduplication.
+    Enforces atomic, race-free single-record integrity per student per date in SQLite.
 
     Parameters:
     -----------
@@ -581,24 +837,56 @@ def log_attendance(student_id: str, roll: str, name: str, department: str,
     try:
         cursor = conn.cursor()
         
-        # Check daily deduplication query
+        # Check daily deduplication query first
         cursor.execute("""
             SELECT attendance_id FROM attendance 
             WHERE student_id = ? AND date = ?
-        """, (str(student_id).strip(), date_str))
+        """, (str(student_id).strip(), str(date_str).strip()))
         existing = cursor.fetchone()
         if existing:
             return False, f"Attendance already marked for {name} ({student_id}) today."
         
-        # Insert attendance log
+        # Insert attendance log with atomic transaction safety
         cursor.execute("""
             INSERT INTO attendance (student_id, roll, name, department, time, date, status)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (str(student_id).strip(), roll, name, department, time_str, date_str, status))
+        """, (str(student_id).strip(), str(roll).strip(), str(name).strip(), str(department).strip(), str(time_str).strip(), str(date_str).strip(), str(status).strip()))
         conn.commit()
         return True, f"Attendance marked for {name} ({student_id})!"
+    except sqlite3.IntegrityError:
+        return False, f"Attendance already marked for {name} ({student_id}) today."
     except Exception as e:
         return False, f"Error logging attendance: {str(e)}"
+    finally:
+        conn.close()
+
+
+def is_student_marked_today(student_id: str, date_str: str) -> bool:
+    """
+    Checks if a student already has an attendance record logged for the specified date in SQLite.
+
+    Parameters:
+    -----------
+    student_id : str
+        Student identification key.
+    date_str : str
+        Date string ('DD/MM/YYYY').
+
+    Returns:
+    --------
+    bool
+        True if attendance was already recorded today, False otherwise.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT attendance_id FROM attendance 
+            WHERE student_id = ? AND date = ?
+        """, (str(student_id).strip(), str(date_str).strip()))
+        return cursor.fetchone() is not None
+    except Exception:
+        return False
     finally:
         conn.close()
 
@@ -648,6 +936,186 @@ def update_attendance_record(attendance_id: int, status: str) -> Tuple[bool, str
         return True, "Attendance updated successfully!"
     except Exception as e:
         return False, f"Error updating attendance: {str(e)}"
+    finally:
+        conn.close()
+
+
+def delete_attendance_record(attendance_id: int) -> Tuple[bool, str]:
+    """
+    Deletes a specific attendance record by its primary key `attendance_id`.
+
+    Parameters:
+    -----------
+    attendance_id : int
+        Primary key ID of the attendance record.
+
+    Returns:
+    --------
+    Tuple[bool, str]
+        (Success flag, Status message).
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM attendance WHERE attendance_id = ?", (int(attendance_id),))
+        if cursor.rowcount == 0:
+            return False, f"Attendance record #{attendance_id} not found."
+        conn.commit()
+        return True, f"Attendance record #{attendance_id} deleted successfully!"
+    except Exception as e:
+        return False, f"Error deleting attendance record: {str(e)}"
+    finally:
+        conn.close()
+
+
+# =============================================================================
+# Email Notification Tracking & Duplicate Prevention Helpers
+# =============================================================================
+
+def has_notification_been_sent(student_id: str, attendance_date: str, status: str) -> bool:
+    """
+    Checks if a notification for this student, date, and status was already accepted by Brevo API.
+    Prevents duplicate emails upon refresh, reload, or app restart.
+
+    Parameters:
+    -----------
+    student_id : str
+        Student ID (e.g. '1' or '23053645').
+    attendance_date : str
+        Date string (e.g. '30/10/2026').
+    status : str
+        Attendance status ('Present' or 'Absent').
+
+    Returns:
+    --------
+    bool
+        True if already successfully accepted by email provider; False otherwise.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id FROM email_notifications 
+            WHERE student_id = ? AND attendance_date = ? AND LOWER(status) = LOWER(?) AND delivery_result = 'ACCEPTED'
+            LIMIT 1
+        """, (str(student_id).strip(), str(attendance_date).strip(), str(status).strip()))
+        return cursor.fetchone() is not None
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def record_notification_attempt(student_id: str, roll: str, attendance_date: str, 
+                                status: str, recipient_email: str, delivery_result: str, 
+                                provider_message_id: str = "", error_details: str = "") -> int:
+    """
+    Persistently logs an email notification dispatch attempt to SQLite for audit and deduplication.
+    Uses UPSERT conflict resolution on (student_id, attendance_date, status) to enforce at most
+    one notification record per student, date, and status while preserving ACCEPTED delivery proofs.
+
+    Parameters:
+    -----------
+    student_id, roll, attendance_date, status, recipient_email : str
+        Student and session details.
+    delivery_result : str
+        Outcome: 'ACCEPTED', 'FAILED', 'SKIPPED_DUPLICATE', 'CONFIG_ERROR', 'INVALID_RECIPIENT'.
+    provider_message_id : str, optional
+        Unique message ID returned by Brevo API (e.g. '<20261030...mailin.fr>').
+    error_details : str, optional
+        Sanitized error description.
+
+    Returns:
+    --------
+    int
+        Primary key ID of the inserted or updated record (or -1 on error).
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        clean_sid = str(student_id).strip()
+        clean_roll = str(roll).strip()
+        clean_date = str(attendance_date).strip()
+        clean_status = str(status).strip().upper()
+        clean_email = str(recipient_email).strip()
+        clean_result = str(delivery_result).strip()
+        clean_msg_id = str(provider_message_id or "").strip()
+        clean_err = str(error_details or "").strip()
+
+        cursor.execute("""
+            INSERT INTO email_notifications (
+                student_id, roll, attendance_date, status, recipient_email, 
+                delivery_result, provider_message_id, error_details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(student_id, attendance_date, status) DO UPDATE SET
+                roll = excluded.roll,
+                recipient_email = excluded.recipient_email,
+                delivery_result = CASE 
+                    WHEN email_notifications.delivery_result = 'ACCEPTED' AND excluded.delivery_result != 'ACCEPTED' 
+                    THEN email_notifications.delivery_result 
+                    ELSE excluded.delivery_result 
+                END,
+                provider_message_id = CASE 
+                    WHEN excluded.provider_message_id != '' 
+                    THEN excluded.provider_message_id 
+                    ELSE email_notifications.provider_message_id 
+                END,
+                error_details = excluded.error_details,
+                timestamp = CURRENT_TIMESTAMP
+        """, (
+            clean_sid,
+            clean_roll,
+            clean_date,
+            clean_status,
+            clean_email,
+            clean_result,
+            clean_msg_id,
+            clean_err
+        ))
+        conn.commit()
+        return cursor.lastrowid or -1
+    except Exception:
+        return -1
+    finally:
+        conn.close()
+
+
+def get_notification_history(student_id: Optional[str] = None, 
+                             attendance_date: Optional[str] = None, 
+                             limit: int = 50) -> List[Dict[str, Any]]:
+    """
+    Retrieves recent notification tracking records ordered by timestamp descending.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        query = "SELECT id, student_id, roll, attendance_date, status, recipient_email, delivery_result, provider_message_id, error_details, timestamp FROM email_notifications"
+        conditions = []
+        params: List[Any] = []
+        if student_id:
+            conditions.append("student_id = ?")
+            params.append(str(student_id).strip())
+        if attendance_date:
+            conditions.append("attendance_date = ?")
+            params.append(str(attendance_date).strip())
+        
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        return [
+            {
+                "id": r[0], "student_id": r[1], "roll": r[2], "date": r[3],
+                "status": r[4], "recipient_email": r[5], "delivery_result": r[6],
+                "provider_message_id": r[7], "error_details": r[8], "timestamp": r[9]
+            }
+            for r in rows
+        ]
+    except Exception:
+        return []
     finally:
         conn.close()
 

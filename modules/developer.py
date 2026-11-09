@@ -80,7 +80,7 @@ DEVELOPERS = [
         "name": "DEEPAK SAH",
         "roll": "23053920",
         "role": "System Testing",
-        "img": "dev_4.jpg",
+        "img": "dev_3.jpg",
         "skills": "Software Testing, System Verification & Bug Fixing",
         "email": "23053920@kiit.ac.in",
         "badge_color": "#9333ea"
@@ -89,7 +89,7 @@ DEVELOPERS = [
         "name": "SANTOSH SAH",
         "roll": "23053926",
         "role": "Attendance System",
-        "img": "dev_3.jpg",
+        "img": "dev_4.jpg",
         "skills": "Attendance Records, CSV File Export & Daily Tracking",
         "email": "23053926@kiit.ac.in",
         "badge_color": "#16a34a"

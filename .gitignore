@@ -1,0 +1,94 @@
+
+# ==========================================
+# Python Virtual Environments
+# ==========================================
+.venv/
+venv/
+ENV/
+env/
+
+# ==========================================
+# Python Cache and Compiled Files
+# ==========================================
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# ==========================================
+# Environment Variables and Secrets
+# ==========================================
+.env
+.env.*
+!.env.example
+
+# ==========================================
+# Database Files and Backups
+# ==========================================
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+*.backup*
+database/*.backup*
+
+# ==========================================
+# Student Data and Personal Images
+# ==========================================
+data/
+attendance_records/
+assets/dev_backup/
+
+# ==========================================
+# Generated Classifier Models
+# ==========================================
+classifier/
+
+# ==========================================
+# Email Configuration and Credentials
+# ==========================================
+config/email_config.json
+
+# ==========================================
+# Generated Output and Temporary Files
+# ==========================================
+output/
+tmp/
+temp/
+scratch/
+*.log
+
+# ==========================================
+# IDE and Operating System Files
+# ==========================================
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
+# Student personal data
+data/
+attendance_records/
+classifier/
+
+# Private configuration and session files
+config/email_config.json
+database/.user_session.json
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Python cache
+__pycache__/
+**/__pycache__/
+*.py[cod]
+# Notebook with potentially sensitive saved outputs
+Facial_Recognition_Attendance_System_Report.ipynb
+
+# Personal developer photos
+assets/developer_photo.png
+assets/dev_*.jpg

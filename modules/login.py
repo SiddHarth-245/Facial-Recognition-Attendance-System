@@ -97,7 +97,24 @@ class LoginWindow:
         self.setup_ui()
         
         # Bind dynamic window resize event
-        self.root.bind("<Configure>", self.handle_resize)
+        self._configure_bind_id = self.root.bind("<Configure>", self.handle_resize)
+        self.root.after(150, self._check_first_run)
+
+    def _check_first_run(self):
+        """Detects if no administrative accounts exist and guides user through first-run setup."""
+        try:
+            from database.db_manager import is_first_run
+            if is_first_run():
+                messagebox.showinfo(
+                    "First-Run Setup Required",
+                    "Welcome to FaceAttend!\n\n"
+                    "No administrator accounts currently exist in the database.\n"
+                    "Please create your primary administrator account to secure the system.",
+                    parent=self.root
+                )
+                self.open_register()
+        except Exception:
+            pass
 
     def load_saved_credentials(self):
         """Loads and auto-populates saved credentials if 'Remember Me' was enabled."""
@@ -107,18 +124,17 @@ class LoginWindow:
                     data = json.load(f)
                     if data.get("remember", True):
                         self.var_username.set(data.get("username", ""))
-                        self.var_password.set(data.get("password", ""))
                         self.var_remember.set(True)
             except Exception:
                 pass
 
-    def save_credentials(self, username, password):
-        """Saves or clears credentials in `.user_session.json` based on checkbox state."""
+    def save_credentials(self, username, password=None):
+        """Saves username in `.user_session.json` based on checkbox state (never caches plaintext passwords)."""
         try:
             os.makedirs(os.path.dirname(SESSION_FILE), exist_ok=True)
             if self.var_remember.get():
                 with open(SESSION_FILE, "w", encoding="utf-8") as f:
-                    json.dump({"username": username, "password": password, "remember": True}, f)
+                    json.dump({"username": username, "remember": True}, f)
             else:
                 if os.path.exists(SESSION_FILE):
                     os.remove(SESSION_FILE)
@@ -132,6 +148,7 @@ class LoginWindow:
         # -------------------------------------------------------------------------
         self.bg_frame = tk.Frame(self.root, bg="#030b18")
         self.bg_frame.pack(fill=tk.BOTH, expand=True)
+        self.bg_frame.bind("<Destroy>", self._on_destroy)
 
         self.lbl_bg = tk.Label(self.bg_frame, bg="#030b18")
         self.lbl_bg.place(x=0, y=0, relwidth=1, relheight=1)
@@ -153,6 +170,7 @@ class LoginWindow:
             highlightthickness=1
         )
         self.login_card.place(relx=0.76, rely=0.55, anchor=tk.CENTER, width=card_w, height=card_h)
+        self.login_card.bind("<Destroy>", self._on_destroy)
 
         # Top Glowing Accent Bar on Card
         top_accent = tk.Frame(self.login_card, bg="#0084ff", height=4)
@@ -379,11 +397,44 @@ class LoginWindow:
         lbl_register.pack(side=tk.LEFT)
         lbl_register.bind("<Button-1>", lambda e: self.open_register())
 
+    def cancel_pending_resize(self):
+        """Safely cancels any active debounced resize callback and clears the timer."""
+        if getattr(self, "_resize_timer", None) is not None:
+            try:
+                if hasattr(self, "root") and self.root.winfo_exists():
+                    self.root.after_cancel(self._resize_timer)
+            except (tk.TclError, Exception):
+                pass
+            self._resize_timer = None
+
+    def cleanup_bindings(self):
+        """Unbinds resize listeners from root and cancels pending callbacks."""
+        self.cancel_pending_resize()
+        if hasattr(self, "_configure_bind_id") and self._configure_bind_id:
+            try:
+                if hasattr(self, "root") and self.root.winfo_exists():
+                    self.root.unbind("<Configure>", self._configure_bind_id)
+            except (tk.TclError, Exception):
+                pass
+            self._configure_bind_id = None
+
+    def _on_destroy(self, event=None):
+        """Cancels pending callbacks when login widgets or window are destroyed."""
+        self.cancel_pending_resize()
+
     def update_background_image(self, target_w: int, target_h: int):
         """
         Resizes and updates the background image to match target window dimensions exactly,
         ensuring 100% of the graphic from top header to bottom footer is fully displayed.
         """
+        if not hasattr(self, "root") or not hasattr(self, "lbl_bg"):
+            return
+        try:
+            if not self.root.winfo_exists() or not self.lbl_bg.winfo_exists():
+                return
+        except (tk.TclError, Exception):
+            return
+
         bg_path = os.path.join(ASSETS_DIR, "bg_login.png")
         if os.path.exists(bg_path):
             try:
@@ -392,28 +443,55 @@ class LoginWindow:
                 img_bg = Image.open(bg_path).resize((target_w, target_h), Image.Resampling.LANCZOS)
                 photo_bg = ImageTk.PhotoImage(img_bg, master=self.root)
                 self._photo_bg_ref = photo_bg  # Preserve in-memory reference
-                self.lbl_bg.config(image=photo_bg)
-            except Exception:
+                if self.lbl_bg.winfo_exists():
+                    self.lbl_bg.config(image=photo_bg)
+            except (tk.TclError, Exception):
                 pass
 
     def handle_resize(self, event):
         """Debounced handler to dynamically re-scale background when window size changes."""
+        if not hasattr(self, "root") or not hasattr(self, "login_card"):
+            return
+        try:
+            if not self.root.winfo_exists() or not self.login_card.winfo_exists():
+                self.cancel_pending_resize()
+                return
+        except (tk.TclError, Exception):
+            self.cancel_pending_resize()
+            return
+
         if event.widget == self.root:
             cur_w = event.width
             cur_h = event.height
             # Only trigger if dimensions significantly changed (> 15px)
             if abs(cur_w - self._last_dims[0]) > 15 or abs(cur_h - self._last_dims[1]) > 15:
                 self._last_dims = (cur_w, cur_h)
-                if self._resize_timer is not None:
-                    self.root.after_cancel(self._resize_timer)
-                self._resize_timer = self.root.after(80, lambda: self._apply_resize(cur_w, cur_h))
+                self.cancel_pending_resize()
+                try:
+                    self._resize_timer = self.root.after(80, lambda: self._apply_resize(cur_w, cur_h))
+                except (tk.TclError, Exception):
+                    self._resize_timer = None
 
     def _apply_resize(self, new_w: int, new_h: int):
         """Applies re-scaling to background and right card."""
-        self.update_background_image(new_w, new_h)
-        card_w = min(410, max(300, int(new_w * 0.32)))
-        card_h = min(510, max(400, int(new_h * 0.72)))
-        self.login_card.place_configure(relx=0.76, rely=0.55, width=card_w, height=card_h)
+        self._resize_timer = None
+
+        if not hasattr(self, "root") or not hasattr(self, "login_card"):
+            return
+        try:
+            if not self.root.winfo_exists() or not self.login_card.winfo_exists():
+                return
+        except (tk.TclError, Exception):
+            return
+
+        try:
+            self.update_background_image(new_w, new_h)
+            card_w = min(410, max(300, int(new_w * 0.32)))
+            card_h = min(510, max(400, int(new_h * 0.72)))
+            if self.login_card.winfo_exists():
+                self.login_card.place_configure(relx=0.76, rely=0.55, width=card_w, height=card_h)
+        except (tk.TclError, Exception):
+            pass
 
     def toggle_password_visibility(self):
         """Toggles the password field masking between plaintext and hidden."""
@@ -456,13 +534,18 @@ class LoginWindow:
 
     def open_forget_password(self):
         """Opens password recovery window."""
+        self.cancel_pending_resize()
         ForgetPasswordWindow(self.root)
 
     def open_dashboard(self, user_data):
         """Transitions into MainDashboard cleanly on the single root window."""
+        self.cleanup_bindings()
         from modules.dashboard import MainDashboard
         for widget in self.root.winfo_children():
-            widget.destroy()
+            try:
+                widget.destroy()
+            except (tk.TclError, Exception):
+                pass
         MainDashboard(self.root, user_data)
 
 

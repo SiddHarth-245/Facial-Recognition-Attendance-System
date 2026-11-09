@@ -51,7 +51,7 @@ except Exception:
         pass
 
 # Database helper functions for mapping Student IDs to readable names
-from database.db_manager import get_student_by_id, fetch_all_students
+from database.db_manager import get_student_by_id, fetch_all_students, get_enrolled_student_ids
 
 # Filesystem paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -68,18 +68,38 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 def train_classifier_core() -> tuple:
     """
-    Core headless Machine Learning training routine.
+    Core headless Machine Learning training routine with enrolled-student safeguards.
     
-    Reads all `user.<StudentID>.<SampleNum>.jpg` image files from `data/`,
-    builds integer-to-string identity maps, trains an 8x8 cell LBPH recognizer,
-    and writes `classifier.xml` and `id_map.json` to the `classifier/` directory.
+    Recognition Safeguard:
+    ----------------------
+    Strictly trains ONLY on photographic face samples belonging to students currently enrolled
+    in the SQLite institutional database. Ignores orphaned image files from deleted or unverified
+    students. If no enrolled student samples exist, invalidates stale classifier files.
 
     Returns:
     --------
     tuple: (success: bool, total_faces: int, student_counts: dict, message: str)
     """
+    classifier_xml = os.path.join(CLASSIFIER_DIR, "classifier.xml")
+    id_map_file = os.path.join(CLASSIFIER_DIR, "id_map.json")
+
+    # Query active enrolled student IDs from SQLite source of truth
+    try:
+        active_student_ids = get_enrolled_student_ids()
+    except Exception:
+        active_student_ids = set()
+
     image_paths = glob.glob(os.path.join(DATA_DIR, "*.jpg"))
-    if not image_paths:
+    if not image_paths or not active_student_ids:
+        # Invalidate stale model files to prevent false recognitions
+        for f in [classifier_xml, id_map_file]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+        if not active_student_ids:
+            return False, 0, {}, "No enrolled students found in database to train."
         return False, 0, {}, "No face samples found in 'data/' directory."
 
     faces = []          # List of 200x200 equalized grayscale numpy image matrices
@@ -88,6 +108,7 @@ def train_classifier_core() -> tuple:
     int_to_id = {}      # Sequential Integer Label -> String Student ID (e.g. "1" -> "23053645")
     student_counts = {} # Student ID -> Count of valid samples parsed
     next_int_id = 1
+    ignored_orphaned_samples = 0
 
     # Group and sort image files by student ID for deterministic label indexing
     student_to_files = {}
@@ -95,13 +116,24 @@ def train_classifier_core() -> tuple:
         img_file = os.path.split(img_path)[1]
         parts = img_file.split(".")
         if len(parts) >= 3 and parts[0].lower() == "user":
-            raw_id = parts[1]
+            raw_id = parts[1].strip()
+            # Enforce safeguard: only train on samples belonging to enrolled students
+            if raw_id not in active_student_ids:
+                ignored_orphaned_samples += 1
+                continue
             if raw_id not in student_to_files:
                 student_to_files[raw_id] = []
             student_to_files[raw_id].append(img_path)
 
     if not student_to_files:
-        return False, 0, {}, "No valid 'user.<student_id>.<num>.jpg' samples found."
+        # Invalidate stale model files when no active students have samples
+        for f in [classifier_xml, id_map_file]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+        return False, 0, {}, "No valid face samples found for currently enrolled students."
 
     # Sort student IDs deterministically (numerical if digits, else string)
     sorted_ids = sorted(student_to_files.keys(), key=lambda s: (int(s) if s.isdigit() else float('inf'), s))
@@ -126,22 +158,32 @@ def train_classifier_core() -> tuple:
                 continue
 
     if not faces or not ids:
+        for f in [classifier_xml, id_map_file]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
         return False, 0, {}, "No valid face samples could be parsed."
 
     # Initialize and Train Local Binary Patterns Histograms (LBPH) Recognizer
     clf = cv2.face.LBPHFaceRecognizer_create(radius=2, neighbors=8, grid_x=8, grid_y=8)
     clf.train(faces, np.array(ids))
 
-    # File serialization paths
-    classifier_xml = os.path.join(CLASSIFIER_DIR, "classifier.xml")
-    id_map_file = os.path.join(CLASSIFIER_DIR, "id_map.json")
-
     # Serialize trained model weights and ID lookup dictionaries
+    # Purge old model file before writing to prevent OpenCV 5 FileStorage truncation lock errors
+    if os.path.exists(classifier_xml):
+        try:
+            os.remove(classifier_xml)
+        except Exception:
+            pass
+
     clf.write(classifier_xml)
     with open(id_map_file, "w", encoding="utf-8") as f:
         json.dump({"id_to_int": id_to_int, "int_to_id": int_to_id}, f, indent=2)
 
-    return True, len(faces), student_counts, f"Successfully trained on {len(faces)} face samples for {len(id_to_int)} student(s)."
+    orphan_note = f" (ignored {ignored_orphaned_samples} orphaned sample(s))" if ignored_orphaned_samples > 0 else ""
+    return True, len(faces), student_counts, f"Successfully trained on {len(faces)} face samples for {len(id_to_int)} enrolled student(s){orphan_note}."
 
 
 class TrainDataWindow:

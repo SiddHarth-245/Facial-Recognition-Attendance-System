@@ -125,6 +125,7 @@ class StudentManagementSystem:
         self.var_phone = tk.StringVar()
         self.var_address = tk.StringVar()
         self.var_teacher = tk.StringVar()
+        self.var_parent_email = tk.StringVar()
         self.var_radio_photo = tk.StringVar(value="Take Photo Sample")
         
         # Table Search State Variables
@@ -424,9 +425,83 @@ class StudentManagementSystem:
         tk.Label(grp_class, text="Mentor:", **lbl_style).grid(row=4, column=2, sticky="w", padx=6, pady=3)
         tk.Entry(grp_class, textvariable=self.var_teacher, width=16, **entry_opts).grid(row=4, column=3, padx=4, pady=3)
 
+        # Parent Email & Blank Button & Test Notification
+        tk.Label(grp_class, text="Parent Email:", **lbl_style).grid(row=5, column=0, sticky="w", padx=6, pady=3)
+        
+        parent_email_frame = tk.Frame(grp_class, bg="#091f40")
+        parent_email_frame.grid(row=5, column=1, sticky="w", padx=4, pady=3)
+        tk.Entry(parent_email_frame, textvariable=self.var_parent_email, width=11, **entry_opts).pack(side=tk.LEFT)
+        tk.Button(
+            parent_email_frame, 
+            text="⌫ Blank", 
+            font=("Segoe UI", 7, "bold"), 
+            bg="#ef4444", 
+            fg="#ffffff", 
+            activebackground="#dc2626", 
+            activeforeground="#ffffff", 
+            bd=0, 
+            relief=tk.FLAT, 
+            cursor="hand2", 
+            padx=4, 
+            pady=2, 
+            command=lambda: self.var_parent_email.set("")
+        ).pack(side=tk.LEFT, padx=(3, 0))
+
+        tk.Label(grp_class, text="Parent Alert:", **lbl_style).grid(row=5, column=2, sticky="w", padx=6, pady=3)
+        btn_alert_frame = tk.Frame(grp_class, bg="#091f40")
+        btn_alert_frame.grid(row=5, column=3, sticky="w", padx=4, pady=3)
+
+        tk.Button(
+            btn_alert_frame, 
+            text="✉ Email Parent", 
+            font=("Segoe UI", 8, "bold"), 
+            bg="#0284c7", 
+            fg="#ffffff", 
+            activebackground="#0369a1", 
+            activeforeground="#ffffff", 
+            bd=0, 
+            relief=tk.FLAT, 
+            cursor="hand2", 
+            padx=5, 
+            pady=2, 
+            command=self.handle_email_parent
+        ).pack(side=tk.LEFT)
+
+        tk.Button(
+            btn_alert_frame, 
+            text="👁 Preview", 
+            font=("Segoe UI", 8, "bold"), 
+            bg="#10b981", 
+            fg="#ffffff", 
+            activebackground="#059669", 
+            activeforeground="#ffffff", 
+            bd=0, 
+            relief=tk.FLAT, 
+            cursor="hand2", 
+            padx=5, 
+            pady=2, 
+            command=self.handle_preview_parent_email
+        ).pack(side=tk.LEFT, padx=(3, 0))
+
+        tk.Button(
+            btn_alert_frame, 
+            text="⚙ Settings", 
+            font=("Segoe UI", 8), 
+            bg="#334155", 
+            fg="#cbd5e1", 
+            activebackground="#475569", 
+            activeforeground="#ffffff", 
+            bd=0, 
+            relief=tk.FLAT, 
+            cursor="hand2", 
+            padx=4, 
+            pady=2, 
+            command=self.handle_open_email_settings
+        ).pack(side=tk.LEFT, padx=(3, 0))
+
         # Photo Sample Radio Buttons
         row_sub = tk.Frame(grp_class, bg="#091f40")
-        row_sub.grid(row=5, column=0, columnspan=4, sticky="ew", padx=6, pady=4)
+        row_sub.grid(row=6, column=0, columnspan=4, sticky="ew", padx=6, pady=3)
 
         tk.Radiobutton(
             row_sub, text="Take Photo Sample", variable=self.var_radio_photo, 
@@ -462,11 +537,12 @@ class StudentManagementSystem:
         btn_bar2 = tk.Frame(left_box, bg="#071a35")
         btn_bar2.pack(fill=tk.X, padx=8, pady=(2, 6))
 
-        tk.Button(
+        self.btn_take_photo = tk.Button(
             btn_bar2, text="📷 Take / Update 100 Photo Samples ➔", 
             bg="#10b981", fg="#ffffff", activebackground="#059669", activeforeground="#ffffff",
             command=self.handle_take_photo_sample, **btn_base
-        ).pack(fill=tk.X, ipady=6)
+        )
+        self.btn_take_photo.pack(fill=tk.X, ipady=6)
 
         # =========================================================================
         # RIGHT SECTION: Student Directory Table & Search System
@@ -490,7 +566,7 @@ class StudentManagementSystem:
         
         combo_search = ttk.Combobox(
             grp_search, textvariable=self.var_search_by, font=("Segoe UI", 8), state="readonly", width=14,
-            values=["Select Option", "Student ID", "Roll No", "Phone No", "Department"]
+            values=["Select Option", "Student ID", "Roll No", "Phone No", "Department", "Parent Email"]
         )
         combo_search.pack(side=tk.LEFT, padx=4, pady=4)
 
@@ -506,7 +582,7 @@ class StudentManagementSystem:
         scroll_x = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL)
         scroll_y = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, style="Cyber.Vertical.TScrollbar")
 
-        columns = ("dep", "course", "year", "sem", "id", "name", "div", "roll", "gender", "dob", "email", "phone", "address", "teacher", "photo")
+        columns = ("dep", "course", "year", "sem", "id", "name", "div", "roll", "gender", "dob", "email", "phone", "address", "teacher", "photo", "parent_email")
         self.student_table = ttk.Treeview(
             table_frame, 
             columns=columns, 
@@ -533,11 +609,12 @@ class StudentManagementSystem:
             ("roll", "Roll No", 80),
             ("gender", "Gender", 70),
             ("dob", "DOB", 80),
-            ("email", "Email", 140),
+            ("email", "Student Email", 130),
             ("phone", "Phone", 90),
             ("address", "Address", 120),
             ("teacher", "Mentor", 100),
-            ("photo", "Sample", 65)
+            ("photo", "Sample", 65),
+            ("parent_email", "Parent Email", 140)
         ]
 
         for cid, heading, width in col_meta:
@@ -574,7 +651,8 @@ class StudentManagementSystem:
             "phone": self.var_phone.get().strip(),
             "address": self.var_address.get().strip(),
             "teacher": self.var_teacher.get().strip(),
-            "photo_sample": "Yes" if self.var_radio_photo.get() == "Take Photo Sample" else "No"
+            "photo_sample": "Yes" if self.var_radio_photo.get() == "Take Photo Sample" else "No",
+            "parent_email": self.var_parent_email.get().strip()
         }
 
     def validate_form(self, data: dict) -> tuple:
@@ -663,6 +741,7 @@ class StudentManagementSystem:
         self.var_phone.set("")
         self.var_address.set("")
         self.var_teacher.set("")
+        self.var_parent_email.set("")
         self.var_radio_photo.set("Take Photo Sample")
 
     def load_students_table(self):
@@ -704,12 +783,147 @@ class StudentManagementSystem:
             self.var_address.set(row[12])
             self.var_teacher.set(row[13])
             self.var_radio_photo.set("Take Photo Sample" if row[14] == "Yes" else "No Photo Sample")
+            if len(row) > 15:
+                self.var_parent_email.set(row[15] if row[15] is not None else "")
+            else:
+                self.var_parent_email.set("")
+
+    def handle_test_parent_email(self):
+        """Sends an immediate test attendance notification to the parent's email address."""
+        p_email = self.var_parent_email.get().strip()
+        if not p_email:
+            messagebox.showwarning(
+                "Parent Email Required", 
+                "Please enter a Parent Email address before testing notification.", 
+                parent=self.root
+            )
+            return
+
+        name = self.var_name.get().strip() or "Student"
+        roll = self.var_roll.get().strip() or "N/A"
+        dep = self.var_dep.get() if self.var_dep.get() != "Select Department" else "General"
+        now = datetime.now()
+        date_str = now.strftime("%d/%m/%Y")
+        time_str = now.strftime("%I:%M:%S %p")
+
+        def on_complete(ok, msg):
+            if ok:
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Parent Email Delivered",
+                    f"Notification successfully delivered to parent!\n\n"
+                    f"Recipient: {p_email}\n"
+                    f"Student: {name} (Roll: {roll})\nStatus: Present\n\n"
+                    f"Status: {msg}",
+                    parent=self.root
+                ))
+            else:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Email Dispatch Notice",
+                    f"Could not deliver email to parent:\n\n{msg}\n\n"
+                    f"Recipient: {p_email}\n\n"
+                    f"Resolution:\n"
+                    f"1. Open Attendance window > Email Settings (or check .env file)\n"
+                    f"2. Ensure BREVO_API_KEY and verified BREVO_SENDER_EMAIL are configured.",
+                    parent=self.root
+                ))
+
+        try:
+            from utils.email_notifier import send_attendance_email_async
+            send_attendance_email_async(
+                student_name=name,
+                roll=roll,
+                department=dep,
+                date_str=date_str,
+                time_str=time_str,
+                status="Present",
+                parent_email=p_email,
+                callback=on_complete
+            )
+        except Exception as ex:
+            messagebox.showerror("Dispatch Error", f"Failed to dispatch test notification:\n{str(ex)}", parent=self.root)
+
+    def handle_preview_parent_email(self):
+        """Generates and opens the formatted HTML parent email in the default browser."""
+        p_email = self.var_parent_email.get().strip()
+        name = self.var_name.get().strip() or "Student"
+        roll = self.var_roll.get().strip() or "N/A"
+        dep = self.var_dep.get() if self.var_dep.get() != "Select Department" else "Computer Science & Engineering"
+        try:
+            from utils.email_notifier import preview_email_in_browser
+            preview_email_in_browser(
+                student_name=name,
+                roll=roll,
+                dep=dep,
+                status="PRESENT",
+                parent_email=p_email
+            )
+        except Exception as ex:
+            messagebox.showerror("Preview Error", str(ex), parent=self.root)
+
+    def handle_email_parent(self):
+        """Sends an attendance notification email to the parent of the currently displayed student via Brevo API."""
+        p_email = self.var_parent_email.get().strip()
+        if not p_email:
+            messagebox.showwarning(
+                "Parent Email Required",
+                "Please enter or select a student with a registered Parent Email address first.",
+                parent=self.root
+            )
+            return
+
+        sid = self.var_id.get().strip() or "N/A"
+        name = self.var_name.get().strip() or "Student"
+        roll = self.var_roll.get().strip() or "N/A"
+        dep = self.var_dep.get() if self.var_dep.get() != "Select Department" else "Computer Science & Engineering"
+        now = datetime.now()
+        date_str = now.strftime("%d/%m/%Y")
+        time_str = now.strftime("%I:%M:%S %p")
+
+        try:
+            from utils.email_notifier import send_parent_attendance_notification
+            ok, msg, outcome = send_parent_attendance_notification(
+                student_id=sid,
+                roll=roll,
+                student_name=name,
+                dep=dep,
+                date_str=date_str,
+                time_str=time_str,
+                status="PRESENT",
+                parent_email=p_email,
+                force=True
+            )
+            if ok:
+                messagebox.showinfo(
+                    "Email Accepted by Brevo",
+                    f"Attendance notification successfully accepted by Brevo API!\n\n"
+                    f"• Recipient: {p_email}\n"
+                    f"• Student: {name} (Roll: {roll})\n"
+                    f"• Status: PRESENT\n\n"
+                    f"{msg}",
+                    parent=self.root
+                )
+            else:
+                messagebox.showerror("Delivery Error", f"Failed to deliver notification:\n\n{msg}", parent=self.root)
+        except Exception as ex:
+            messagebox.showerror("Error", f"Transmission error: {ex}", parent=self.root)
+
+    def handle_open_email_settings(self):
+        """Opens the interactive parent email notification configuration dialog."""
+        try:
+            from utils.email_notifier import open_email_config_dialog
+            open_email_config_dialog(self.root)
+        except Exception as ex:
+            messagebox.showerror("Settings Error", str(ex), parent=self.root)
 
     # -------------------------------------------------------------------------
     # OpenCV Face Capture Logic & Dataset Generation Pipeline
     # -------------------------------------------------------------------------
     def handle_take_photo_sample(self):
         """Validates student profile and launches background sample acquisition."""
+        if getattr(self, "is_capturing", False):
+            messagebox.showinfo("In Progress", "A photo sample capture session is already in progress. Please complete or cancel it first.", parent=self.root)
+            return
+
         student_id = self.var_student_id.get().strip()
         name = self.var_name.get().strip()
         
@@ -722,143 +936,259 @@ class StudentManagementSystem:
         add_student(data)
         update_student(data)
 
+        self.is_capturing = True
+        if hasattr(self, "btn_take_photo") and self.btn_take_photo.winfo_exists():
+            self.btn_take_photo.config(state=tk.DISABLED, text="⏳ Initializing Camera Studio...", bg="#475569")
+
         threading.Thread(target=self._capture_samples_worker, args=(student_id, name), daemon=True).start()
 
     def _capture_samples_worker(self, student_id: str, name: str):
-        """Background worker thread capturing 100 standardized 200x200 face images."""
-        candidates = [
-            os.path.join(BASE_DIR, "haarcascade_frontalface_default.xml"),
-            os.path.join(BASE_DIR, "classifier", "haarcascade_frontalface_default.xml"),
-            os.path.join(getattr(cv2.data, 'haarcascades', ''), "haarcascade_frontalface_default.xml")
-        ]
-        face_classifier = None
-        for p in candidates:
-            if p and os.path.exists(p) and os.path.getsize(p) > 10000:
-                c = cv2.CascadeClassifier(p)
-                if not c.empty():
-                    face_classifier = c
+        """Background worker thread capturing 100 high-clarity 200x200 multi-angle face images."""
+        cap = None
+        win_capture = "FaceAttend - High-Fidelity 100 Photo Sampling Studio"
+        try:
+            candidates = [
+                os.path.join(BASE_DIR, "haarcascade_frontalface_default.xml"),
+                os.path.join(BASE_DIR, "classifier", "haarcascade_frontalface_default.xml"),
+                os.path.join(getattr(cv2.data, 'haarcascades', ''), "haarcascade_frontalface_default.xml")
+            ]
+            face_classifier = None
+            for p in candidates:
+                if p and os.path.exists(p) and os.path.getsize(p) > 10000:
+                    c = cv2.CascadeClassifier(p)
+                    if not c.empty():
+                        face_classifier = c
+                        break
+
+            if face_classifier is None or face_classifier.empty():
+                self.root.after(0, lambda: messagebox.showerror("Error", "Could not load 'haarcascade_frontalface_default.xml'.", parent=self.root))
+                return
+
+            # Comprehensive multi-backend camera acquisition with fallback negotiation
+            backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+            for backend in backends:
+                for idx in [0, 1, 2]:
+                    try:
+                        temp_cap = cv2.VideoCapture(idx, backend)
+                        if not temp_cap.isOpened():
+                            temp_cap.release()
+                            continue
+
+                        # Read initial frames to test stream validity
+                        success = False
+                        for _ in range(10):
+                            ret_t, frame_t = temp_cap.read()
+                            if ret_t and frame_t is not None and frame_t.size > 0:
+                                success = True
+                                break
+                            import time
+                            time.sleep(0.04)
+
+                        if success:
+                            # Try setting HD 720p resolution
+                            try:
+                                temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                                temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                                temp_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                            except Exception:
+                                pass
+
+                            ret_w, frame_w = temp_cap.read()
+                            if ret_w and frame_w is not None and frame_w.size > 0:
+                                cap = temp_cap
+                                break
+                            else:
+                                # Fall back to default resolution
+                                temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                                temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                                ret_w2, frame_w2 = temp_cap.read()
+                                if ret_w2 and frame_w2 is not None and frame_w2.size > 0:
+                                    cap = temp_cap
+                                    break
+                        temp_cap.release()
+                    except Exception:
+                        pass
+                if cap is not None:
                     break
 
-        if face_classifier is None or face_classifier.empty():
-            self.root.after(0, lambda: messagebox.showerror("Error", "Could not load 'haarcascade_frontalface_default.xml'.", parent=self.root))
-            return
+            if cap is None or not cap.isOpened():
+                from modules.face_recognition import diagnose_camera_issue
+                diag_msg = diagnose_camera_issue()
+                self.root.after(0, lambda m=diag_msg: messagebox.showerror("Webcam Device Issue", m, parent=self.root))
+                return
 
-        cap = None
-        camera_probes = [
-            (0, cv2.CAP_DSHOW),
-            (1, cv2.CAP_DSHOW),
-            (0, cv2.CAP_ANY),
-            (1, cv2.CAP_ANY),
-            (2, cv2.CAP_DSHOW),
-            (-1, cv2.CAP_ANY)
-        ]
+            # Sensor warm-up (flush 6 frames so auto-exposure and white balance settle)
+            for _ in range(6):
+                cap.read()
 
-        for idx, backend in camera_probes:
+            sample_count = 0
+            max_samples = 100
+            cv2.namedWindow(win_capture, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(win_capture, 720, 560)
             try:
-                temp_cap = cv2.VideoCapture(idx, backend)
-                if not temp_cap.isOpened():
-                    temp_cap.release()
-                    continue
+                cv2.setWindowProperty(win_capture, cv2.WND_PROP_TOPMOST, 1)
+            except Exception:
+                pass
 
-                try:
-                    temp_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                except Exception:
-                    pass
-                try:
-                    temp_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                    temp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                    temp_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                except Exception:
-                    pass
+            clahe_engine = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            consecutive_empty = 0
+            last_capture_time = 0.0
+            capture_interval = 0.22  # ~4-5 clear, unblurred photos per second
+            transition_until = 0.0
+            transition_text = ""
+            current_phase = 1
+            last_sharpness_status = "STABILIZING"
+            last_sharpness_val = 0.0
 
-                success = False
-                for _ in range(15):
-                    ret_test, frame_test = temp_cap.read()
-                    if ret_test and frame_test is not None and frame_test.size > 0:
-                        success = True
+            while True:
+                ret, frame = cap.read()
+                if not ret or frame is None or frame.size == 0:
+                    consecutive_empty += 1
+                    if consecutive_empty > 25:
                         break
                     import time
-                    time.sleep(0.02)
-
-                if success:
-                    cap = temp_cap
-                    break
-                else:
-                    temp_cap.release()
-            except Exception:
-                pass
-
-        if cap is None or not cap.isOpened():
-            from modules.face_recognition import diagnose_camera_issue
-            diag_msg = diagnose_camera_issue()
-            self.root.after(0, lambda m=diag_msg: messagebox.showerror("Webcam Device Issue", m, parent=self.root))
-            return
-
-        sample_count = 0
-        max_samples = 100
-        win_crop = "Cropped Face"
-        cv2.namedWindow(win_crop, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(win_crop, 500, 500)
-        try:
-            cv2.setWindowProperty(win_crop, cv2.WND_PROP_TOPMOST, 1)
-        except Exception:
-            pass
-
-        clahe_engine = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        consecutive_empty = 0
-
-        while True:
-            ret, frame = cap.read()
-            if not ret or frame is None or frame.size == 0:
-                consecutive_empty += 1
-                if consecutive_empty > 25:
-                    break
-                import time
-                time.sleep(0.01)
-                continue
-            consecutive_empty = 0
-            
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            # Apply CLAHE for enhanced facial edge detection in varying lighting
-            enhanced_gray = clahe_engine.apply(gray)
-            faces = face_classifier.detectMultiScale(enhanced_gray, scaleFactor=1.1, minNeighbors=4, minSize=(40, 40))
-
-            for (x, y, w, h) in faces:
-                sample_count += 1
-                face_raw = gray[y:y+h, x:x+w]
-                if face_raw.size == 0:
+                    time.sleep(0.01)
                     continue
-                
-                # High-fidelity Lanczos4 normalization + Histogram Equalization
-                face_resized = cv2.resize(face_raw, (200, 200), interpolation=cv2.INTER_LANCZOS4)
-                face_crop = cv2.equalizeHist(face_resized)
-                file_name = f"user.{student_id}.{sample_count}.jpg"
-                file_path = os.path.join(DATA_DIR, file_name)
-                cv2.imwrite(file_path, face_crop)
+                consecutive_empty = 0
 
-                display_crop = cv2.resize(face_crop, (450, 450), interpolation=cv2.INTER_CUBIC)
-                display_bgr = cv2.cvtColor(display_crop, cv2.COLOR_GRAY2BGR)
-                cv2.rectangle(display_bgr, (0, 0), (450, 80), (20, 20, 30), -1)
-                cv2.putText(display_bgr, f"Sample: {sample_count}/{max_samples}", (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 255, 0), 2)
-                cv2.putText(display_bgr, f"ID: {student_id} | {name}", (15, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+                import time
+                now_t = time.time()
+                display_frame = frame.copy()
+                h_f, w_f = display_frame.shape[:2]
 
-                cv2.imshow(win_crop, display_bgr)
+                # Guided 3-Phase Multi-Pose Schedule (Center, Left Profile, Right Profile)
+                if sample_count < 35:
+                    phase_title = "PHASE 1/3: LOOK STRAIGHT (Frontal Pose)"
+                    phase_sub = "Hold head steady and look directly at camera"
+                    phase_color = (0, 255, 120)  # Neon Green
+                    if current_phase != 1:
+                        current_phase = 1
+                elif sample_count < 68:
+                    if current_phase == 1:
+                        current_phase = 2
+                        transition_until = now_t + 2.0  # 2.0s transition countdown
+                        transition_text = "GET READY: SLOWLY TURN HEAD TO LEFT <-"
+                    phase_title = "PHASE 2/3: TURN HEAD LEFT <- (Left Profile)"
+                    phase_sub = "Turn head slightly to the LEFT and hold steady"
+                    phase_color = (0, 235, 255)  # Cyan
+                else:
+                    if current_phase == 2:
+                        current_phase = 3
+                        transition_until = now_t + 2.0  # 2.0s transition countdown
+                        transition_text = "GET READY: SLOWLY TURN HEAD TO RIGHT ->"
+                    phase_title = "PHASE 3/3: TURN HEAD RIGHT -> (Right Profile)"
+                    phase_sub = "Turn head slightly to the RIGHT and hold steady"
+                    phase_color = (0, 160, 255)  # Vivid Orange / Blue
 
-            key = cv2.waitKey(1) & 0xFF
-            if key in (ord('q'), ord('Q'), ord('x'), ord('X'), 27, 13, ord(' ')) or sample_count >= max_samples:
-                break
+                is_in_transition = (now_t < transition_until)
 
-            try:
-                if sample_count > 0 and cv2.getWindowProperty(win_crop, cv2.WND_PROP_VISIBLE) < 1:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                enhanced_gray = clahe_engine.apply(gray)
+                faces = face_classifier.detectMultiScale(
+                    enhanced_gray, 
+                    scaleFactor=1.1, 
+                    minNeighbors=5, 
+                    minSize=(70, 70)  # Filter out small or distant blurry detections
+                )
+
+                face_saved_this_frame = False
+
+                for (x, y, w, h) in faces:
+                    # Filter valid facial aspect ratio
+                    aspect = w / float(max(1, h))
+                    if not (0.75 <= aspect <= 1.30):
+                        continue
+
+                    face_raw = gray[y:y+h, x:x+w]
+                    if face_raw.size == 0:
+                        continue
+
+                    # Sharpness verification (variance of Laplacian) to reject motion-blurred frames
+                    sharpness = float(cv2.Laplacian(face_raw, cv2.CV_64F).var())
+                    last_sharpness_val = sharpness
+                    is_sharp = (sharpness >= 55.0)
+
+                    # Dynamic bounding box color reflecting sharpness
+                    box_color = phase_color if is_sharp else (0, 180, 255)
+                    cv2.rectangle(display_frame, (x, y), (x + w, y + h), box_color, 2)
+                    c_len = min(24, w // 4)
+                    cv2.line(display_frame, (x, y), (x + c_len, y), (255, 255, 255), 2)
+                    cv2.line(display_frame, (x, y), (x, y + c_len), (255, 255, 255), 2)
+                    cv2.line(display_frame, (x + w, y), (x + w - c_len, y), (255, 255, 255), 2)
+                    cv2.line(display_frame, (x + w, y), (x + w, y + c_len), (255, 255, 255), 2)
+                    cv2.line(display_frame, (x, y + h), (x + c_len, y + h), (255, 255, 255), 2)
+                    cv2.line(display_frame, (x, y + h), (x, y + h - c_len), (255, 255, 255), 2)
+                    cv2.line(display_frame, (x + w, y + h), (x + w - c_len, y + h), (255, 255, 255), 2)
+                    cv2.line(display_frame, (x + w, y + h), (x + w, y + h - c_len), (255, 255, 255), 2)
+
+                    # Capture photo sample if sharp, not transitioning, and pacing interval met
+                    if not is_in_transition and (now_t - last_capture_time >= capture_interval):
+                        if is_sharp:
+                            sample_count += 1
+                            last_capture_time = now_t
+                            last_sharpness_status = "CAPTURED"
+                            face_saved_this_frame = True
+
+                            # High-fidelity Lanczos4 normalization + Histogram Equalization
+                            face_resized = cv2.resize(face_raw, (200, 200), interpolation=cv2.INTER_LANCZOS4)
+                            face_crop = cv2.equalizeHist(face_resized)
+                            file_name = f"user.{student_id}.{sample_count}.jpg"
+                            file_path = os.path.join(DATA_DIR, file_name)
+                            cv2.imwrite(file_path, face_crop)
+                        else:
+                            last_sharpness_status = "HOLD STEADY (BLUR)"
+                    break  # Only process primary centered face
+
+                # Top Guidance HUD Banner
+                cv2.rectangle(display_frame, (0, 0), (w_f, 72), (15, 23, 42), -1)
+                cv2.line(display_frame, (0, 72), (w_f, 72), phase_color, 2)
+
+                if is_in_transition:
+                    cv2.putText(display_frame, transition_text, (20, 46), cv2.FONT_HERSHEY_DUPLEX, 0.72, (0, 240, 255), 2, cv2.LINE_AA)
+                else:
+                    cv2.putText(display_frame, phase_title, (20, 28), cv2.FONT_HERSHEY_DUPLEX, 0.60, phase_color, 2, cv2.LINE_AA)
+                    cv2.putText(display_frame, f"{phase_sub}  |  Student: {name} (ID: {student_id})", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (226, 232, 240), 1, cv2.LINE_AA)
+
+                    # Sharpness telemetry badge
+                    if last_sharpness_status == "CAPTURED" and face_saved_this_frame:
+                        cv2.putText(display_frame, "[OK] CRISP & CLEAR SAVED", (w_f - 240, 28), cv2.FONT_HERSHEY_DUPLEX, 0.44, (0, 255, 120), 1, cv2.LINE_AA)
+                    elif last_sharpness_status == "HOLD STEADY (BLUR)":
+                        cv2.putText(display_frame, "[!] HOLD STILL (BLUR DETECTED)", (w_f - 275, 28), cv2.FONT_HERSHEY_DUPLEX, 0.44, (0, 180, 255), 1, cv2.LINE_AA)
+
+                # Bottom Progress Bar
+                cv2.rectangle(display_frame, (0, h_f - 44), (w_f, h_f), (15, 23, 42), -1)
+                cv2.line(display_frame, (0, h_f - 44), (w_f, h_f - 44), (51, 65, 85), 1)
+
+                progress_ratio = min(1.0, sample_count / float(max_samples))
+                bar_w = int((w_f - 40) * progress_ratio)
+                cv2.rectangle(display_frame, (20, h_f - 26), (w_f - 20, h_f - 14), (30, 41, 59), -1)
+                if bar_w > 0:
+                    cv2.rectangle(display_frame, (20, h_f - 26), (20 + bar_w, h_f - 14), phase_color, -1)
+
+                status_str = f"Progress: {sample_count}/{max_samples} Clear Samples ({int(progress_ratio * 100)}%)  |  Sharpness: {int(last_sharpness_val)}  |  Press 'Q' to Cancel"
+                cv2.putText(display_frame, status_str, (20, h_f - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (148, 163, 184), 1, cv2.LINE_AA)
+
+                cv2.imshow(win_capture, display_frame)
+
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord('q'), ord('Q'), ord('x'), ord('X'), 27) or sample_count >= max_samples:
                     break
+
+                try:
+                    if sample_count > 0 and cv2.getWindowProperty(win_capture, cv2.WND_PROP_VISIBLE) < 1:
+                        break
+                except Exception:
+                    pass
+
+        finally:
+            if cap is not None:
+                cap.release()
+            try:
+                cv2.destroyAllWindows()
             except Exception:
                 pass
-
-        cap.release()
-        try:
-            cv2.destroyAllWindows()
-        except Exception:
-            pass
+            self.is_capturing = False
+            self.root.after(0, lambda: self.btn_take_photo.config(state=tk.NORMAL, text="📷 Take / Update 100 Photo Samples ➔", bg="#10b981") if hasattr(self, "btn_take_photo") and self.btn_take_photo.winfo_exists() else None)
 
         if sample_count > 0:
             update_photo_sample_status(student_id, "Yes")
@@ -869,9 +1199,9 @@ class StudentManagementSystem:
             except Exception as ex:
                 print(f"Auto-train notice: {ex}")
 
-            self.root.after(0, lambda: messagebox.showinfo("Result", f"Successfully generated {sample_count} photo sample datasets for {name} (ID: {student_id})!\n\nLBPH Classifier has been re-trained automatically.", parent=self.root))
+            self.root.after(0, lambda: messagebox.showinfo("Result", f"Successfully generated {sample_count} sharp, multi-angle photo samples for {name} (ID: {student_id})!\n\nLBPH Classifier has been re-trained automatically.", parent=self.root))
         else:
-            self.root.after(0, lambda: messagebox.showwarning("Warning", "No face was detected during the capture session.", parent=self.root))
+            self.root.after(0, lambda: messagebox.showwarning("Warning", "No face samples were captured during the session.", parent=self.root))
 
 
 if __name__ == "__main__":
